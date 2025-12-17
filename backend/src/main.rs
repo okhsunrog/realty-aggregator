@@ -20,7 +20,7 @@ use db::Repository;
 use jobs::Collector;
 use routes::{AppState, create_router};
 use storage::StorageClient;
-use vision::VisionAnalyzer;
+use vision::{ImageAnalyzer, ListingAnalyzer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -83,24 +83,44 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Initialize Vision Analyzer (optional)
+    // Initialize Vision Analyzers (optional)
     let openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
-    let vision_analyzer = openrouter_api_key.map(|key| {
-        tracing::info!(
-            "Vision analyzer initialized with model: {}",
-            config.vision.model
-        );
-        Arc::new(VisionAnalyzer::with_model(key, config.vision.model.clone()))
-    });
+    let (image_analyzer, listing_analyzer) = match &openrouter_api_key {
+        Some(key) => {
+            tracing::info!(
+                "Image analyzer initialized with model: {}",
+                config.vision.image_model
+            );
+            tracing::info!(
+                "Listing analyzer initialized with model: {}",
+                config.vision.listing_model
+            );
+            (
+                Some(Arc::new(ImageAnalyzer::new(
+                    key.clone(),
+                    config.vision.image_model.clone(),
+                ))),
+                Some(Arc::new(ListingAnalyzer::new(
+                    key.clone(),
+                    config.vision.listing_model.clone(),
+                ))),
+            )
+        }
+        None => {
+            tracing::warn!("OPENROUTER_API_KEY not set. Vision analysis disabled.");
+            (None, None)
+        }
+    };
 
     let mut collector = Collector::new(api_client.clone(), repository.clone(), config.clone());
     if let Some(storage) = storage_client {
         collector = collector.with_storage_client(storage);
     }
-    if let Some(analyzer) = vision_analyzer {
-        collector = collector.with_vision_analyzer(analyzer);
-    } else {
-        tracing::warn!("OPENROUTER_API_KEY not set. Vision analysis disabled.");
+    if let Some(analyzer) = image_analyzer {
+        collector = collector.with_image_analyzer(analyzer);
+    }
+    if let Some(analyzer) = listing_analyzer {
+        collector = collector.with_listing_analyzer(analyzer);
     }
     let collector = Arc::new(collector);
 

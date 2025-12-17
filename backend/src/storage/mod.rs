@@ -1,3 +1,3 @@
 mod client;
 
-pub use client::{StorageClient, StorageError};
+pub use client::{DownloadResult, StorageClient, StorageError};

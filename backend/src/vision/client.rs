@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL: &str = "google/gemini-2.0-flash-lite-001";
 
 #[derive(Error, Debug)]
 pub enum OpenRouterError {
@@ -63,7 +62,7 @@ struct ResponseMessage {
     content: String,
 }
 
-/// Клиент для OpenRouter API
+/// Client for OpenRouter API
 pub struct OpenRouterClient {
     client: Client,
     api_key: String,
@@ -71,49 +70,60 @@ pub struct OpenRouterClient {
 }
 
 impl OpenRouterClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, model: String) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            model: DEFAULT_MODEL.to_string(),
+            model,
         }
-    }
-
-    pub fn with_model(mut self, model: &str) -> Self {
-        self.model = model.to_string();
-        self
     }
 
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Отправить запрос с изображениями и текстовым промптом
-    pub async fn analyze_images(
+    /// Analyze a single image with a prompt
+    pub async fn analyze_image(
         &self,
-        images_base64: Vec<String>,
+        image_base64: &str,
         prompt: &str,
     ) -> Result<String, OpenRouterError> {
-        let mut content: Vec<Content> = images_base64
-            .into_iter()
-            .map(|img| Content::ImageUrl {
+        let content = vec![
+            Content::ImageUrl {
                 image_url: ImageUrlData {
-                    url: format!("data:image/jpeg;base64,{}", img),
+                    url: format!("data:image/jpeg;base64,{}", image_base64),
                 },
-            })
-            .collect();
+            },
+            Content::Text {
+                text: prompt.to_string(),
+            },
+        ];
 
-        content.push(Content::Text {
+        self.send_request(content, 500).await
+    }
+
+    /// Send a text-only request (for listing-level analysis)
+    pub async fn analyze_text(&self, prompt: &str) -> Result<String, OpenRouterError> {
+        let content = vec![Content::Text {
             text: prompt.to_string(),
-        });
+        }];
 
+        self.send_request(content, 1000).await
+    }
+
+    /// Send request to OpenRouter API
+    async fn send_request(
+        &self,
+        content: Vec<Content>,
+        max_tokens: u32,
+    ) -> Result<String, OpenRouterError> {
         let request = ChatRequest {
             model: self.model.clone(),
             messages: vec![Message {
                 role: "user".to_string(),
                 content,
             }],
-            max_tokens: 2000,
+            max_tokens,
         };
 
         let response = self

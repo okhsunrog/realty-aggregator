@@ -1,8 +1,8 @@
 use sqlx::PgPool;
 
 use super::models::{
-    CollectionConfig, CollectionState, DbListing, ListingForAnalysis, NewCollectionConfig,
-    VisionStatus,
+    CollectionConfig, CollectionState, DbImage, DbListing, ImageAnalysisResult, ImageForAnalysis,
+    ImageForDownload, ImageStatus, ListingAnalysisResult, ListingForAnalysis, NewCollectionConfig,
 };
 
 pub struct Repository {
@@ -18,7 +18,8 @@ impl Repository {
         &self.pool
     }
 
-    // Collection configs
+    // ==================== Collection configs ====================
+
     pub async fn get_active_configs(&self) -> Result<Vec<CollectionConfig>, sqlx::Error> {
         sqlx::query_as::<_, CollectionConfig>(
             "SELECT id, city, category_id, is_active, created_at FROM collection_configs WHERE is_active = true"
@@ -77,16 +78,17 @@ impl Repository {
         .await
     }
 
-    // Listings
-    pub async fn upsert_listing(&self, listing: &DbListing) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    // ==================== Listings ====================
+
+    pub async fn upsert_listing(&self, listing: &DbListing) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             INSERT INTO listings (
                 id, source, url, title, description, price, city, address,
                 lat, lng, rooms, area, floor, floors_total, person_type,
-                photos, params, time_created, time_updated, fetched_at, is_active
+                params, time_created, time_updated, fetched_at, is_active
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
             )
             ON CONFLICT (id) DO UPDATE SET
                 source = EXCLUDED.source,
@@ -103,13 +105,12 @@ impl Repository {
                 floor = EXCLUDED.floor,
                 floors_total = EXCLUDED.floors_total,
                 person_type = EXCLUDED.person_type,
-                photos = EXCLUDED.photos,
                 params = EXCLUDED.params,
                 time_created = EXCLUDED.time_created,
                 time_updated = EXCLUDED.time_updated,
                 fetched_at = EXCLUDED.fetched_at,
                 is_active = EXCLUDED.is_active
-            "#
+            "#,
         )
         .bind(listing.id)
         .bind(&listing.source)
@@ -126,7 +127,6 @@ impl Repository {
         .bind(listing.floor)
         .bind(listing.floors_total)
         .bind(listing.person_type)
-        .bind(&listing.photos)
         .bind(&listing.params)
         .bind(listing.time_created)
         .bind(listing.time_updated)
@@ -134,16 +134,33 @@ impl Repository {
         .bind(listing.is_active)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
-    pub async fn upsert_listings(&self, listings: &[DbListing]) -> Result<usize, sqlx::Error> {
-        let mut count = 0;
-        for listing in listings {
-            self.upsert_listing(listing).await?;
-            count += 1;
+    pub async fn upsert_listing_with_images(
+        &self,
+        listing: &DbListing,
+        photo_urls: &[String],
+    ) -> Result<(), sqlx::Error> {
+        self.upsert_listing(listing).await?;
+
+        // Insert images (ignore conflicts for existing images)
+        for (index, url) in photo_urls.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO images (listing_id, image_index, source_url)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (listing_id, image_index) DO NOTHING
+                "#,
+            )
+            .bind(listing.id)
+            .bind(index as i32)
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
         }
-        Ok(count)
+
+        Ok(())
     }
 
     pub async fn mark_listing_inactive(&self, id: i64) -> Result<bool, sqlx::Error> {
@@ -168,19 +185,24 @@ impl Repository {
         Ok(row.0)
     }
 
-    pub async fn get_last_listing_id(
+    pub async fn get_listing_for_analysis(
         &self,
-        city: &str,
-        category_id: i32,
-    ) -> Result<Option<i64>, sqlx::Error> {
-        let row: Option<(i64,)> = sqlx::query_as("SELECT MAX(id) FROM listings WHERE city LIKE $1")
-            .bind(format!("%{}%", city))
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.0))
+        listing_id: i64,
+    ) -> Result<Option<ListingForAnalysis>, sqlx::Error> {
+        sqlx::query_as::<_, ListingForAnalysis>(
+            r#"
+            SELECT id, title, description, price, area, rooms, floor, floors_total,
+                   address, source, lat, lng
+            FROM listings WHERE id = $1
+            "#,
+        )
+        .bind(listing_id)
+        .fetch_optional(&self.pool)
+        .await
     }
 
-    // Collection state (для инкрементальной загрузки)
+    // ==================== Collection state ====================
+
     pub async fn get_collection_state(&self) -> Result<CollectionState, sqlx::Error> {
         sqlx::query_as::<_, CollectionState>(
             "SELECT id, last_listing_id, last_collection_at FROM collection_state WHERE id = 1",
@@ -191,7 +213,7 @@ impl Repository {
 
     pub async fn update_collection_state(&self, last_listing_id: i64) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "UPDATE collection_state SET last_listing_id = $1, last_collection_at = NOW() WHERE id = 1"
+            "UPDATE collection_state SET last_listing_id = $1, last_collection_at = NOW() WHERE id = 1",
         )
         .bind(last_listing_id)
         .execute(&self.pool)
@@ -199,182 +221,385 @@ impl Repository {
         Ok(())
     }
 
-    // Vision analysis
-    pub async fn save_vision_analysis(
+    // ==================== Images ====================
+
+    /// Get images that need to be downloaded (pending or not_found with < 2 attempts)
+    pub async fn get_images_for_download(
         &self,
-        listing_id: i64,
-        analysis: &serde_json::Value,
+        limit: i64,
+    ) -> Result<Vec<ImageForDownload>, sqlx::Error> {
+        sqlx::query_as::<_, ImageForDownload>(
+            r#"
+            SELECT id, listing_id, image_index, source_url, status, download_attempts
+            FROM images
+            WHERE status = 'pending'
+               OR (status = 'not_found' AND download_attempts < 2)
+            ORDER BY listing_id, image_index
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Update image after download attempt
+    pub async fn update_image_download(
+        &self,
+        image_id: i64,
+        status: ImageStatus,
+        s3_key: Option<&str>,
+        http_status: Option<i32>,
+        error: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let downloaded_at = if status == ImageStatus::Downloaded {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE images
+            SET status = $2,
+                s3_key = COALESCE($3, s3_key),
+                http_status = COALESCE($4, http_status),
+                last_error = $5,
+                download_attempts = download_attempts + 1,
+                downloaded_at = COALESCE($6, downloaded_at)
+            WHERE id = $1
+            "#,
+        )
+        .bind(image_id)
+        .bind(status)
+        .bind(s3_key)
+        .bind(http_status)
+        .bind(error)
+        .bind(downloaded_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Get downloaded images that haven't been analyzed yet
+    pub async fn get_images_for_ai_analysis(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ImageForAnalysis>, sqlx::Error> {
+        sqlx::query_as::<_, ImageForAnalysis>(
+            r#"
+            SELECT id, listing_id, image_index, source_url, s3_key
+            FROM images
+            WHERE status = 'downloaded'
+              AND ai_analyzed_at IS NULL
+            ORDER BY listing_id, image_index
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Save per-image AI analysis result
+    pub async fn save_image_analysis(
+        &self,
+        image_id: i64,
+        analysis: &ImageAnalysisResult,
         model: &str,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            UPDATE listings
-            SET vision_analysis = $2,
-                vision_analyzed_at = NOW(),
-                vision_model = $3,
-                vision_status = 'done',
-                vision_attempts = vision_attempts + 1
+            UPDATE images
+            SET ai_image_type = $2,
+                ai_room = $3,
+                ai_condition = $4,
+                ai_confidence = $5,
+                ai_issues = $6,
+                ai_description = $7,
+                ai_model = $8,
+                ai_analyzed_at = NOW()
             WHERE id = $1
             "#,
         )
-        .bind(listing_id)
-        .bind(analysis)
+        .bind(image_id)
+        .bind(&analysis.image_type)
+        .bind(&analysis.room)
+        .bind(analysis.condition)
+        .bind(analysis.confidence)
+        .bind(&analysis.issues)
+        .bind(&analysis.description)
         .bind(model)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn update_vision_status(
+    /// Get all analyzed images for a listing (for second-layer analysis)
+    pub async fn get_listing_image_analyses(
         &self,
         listing_id: i64,
-        status: VisionStatus,
-        error: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<Vec<DbImage>, sqlx::Error> {
+        sqlx::query_as::<_, DbImage>(
             r#"
-            UPDATE listings
-            SET vision_status = $2,
-                vision_last_error = $3,
-                vision_attempts = vision_attempts + 1
-            WHERE id = $1
+            SELECT id, listing_id, image_index, source_url, status, s3_key, http_status,
+                   download_attempts, last_error, downloaded_at, ai_image_type, ai_room,
+                   ai_condition, ai_confidence, ai_issues, ai_description, ai_model,
+                   ai_analyzed_at, created_at
+            FROM images
+            WHERE listing_id = $1
+              AND ai_analyzed_at IS NOT NULL
+            ORDER BY image_index
             "#,
         )
         .bind(listing_id)
-        .bind(status)
-        .bind(error)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .fetch_all(&self.pool)
+        .await
     }
 
-    pub async fn set_vision_status_not_needed(
-        &self,
-        listing_id: i64,
-        reason: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            UPDATE listings
-            SET vision_status = 'not_needed', vision_last_error = $2
-            WHERE id = $1
-            "#,
-        )
-        .bind(listing_id)
-        .bind(reason)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn get_listings_for_analysis(
+    /// Get listings that have all images analyzed but no listing-level analysis yet
+    pub async fn get_listings_for_second_layer_analysis(
         &self,
         limit: i64,
-    ) -> Result<Vec<ListingForAnalysis>, sqlx::Error> {
-        sqlx::query_as::<_, ListingForAnalysis>(
+    ) -> Result<Vec<i64>, sqlx::Error> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
             r#"
-            SELECT id, photos, price, area, source, lat, lng,
-                   images_stored, images_count, vision_status, vision_attempts
-            FROM listings
-            WHERE vision_status = 'pending'
-              AND is_active = true
-            ORDER BY fetched_at DESC
+            SELECT DISTINCT l.id
+            FROM listings l
+            WHERE l.analyzed_at IS NULL
+              AND l.is_active = true
+              AND EXISTS (
+                  SELECT 1 FROM images i
+                  WHERE i.listing_id = l.id
+                    AND i.ai_analyzed_at IS NOT NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM images i
+                  WHERE i.listing_id = l.id
+                    AND i.status = 'downloaded'
+                    AND i.ai_analyzed_at IS NULL
+              )
             LIMIT $1
             "#,
         )
         .bind(limit)
         .fetch_all(&self.pool)
-        .await
+        .await?;
+
+        Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    pub async fn get_listings_needing_images(
+    /// Save listing-level AI analysis result
+    pub async fn save_listing_analysis(
         &self,
-        limit: i64,
-    ) -> Result<Vec<ListingForAnalysis>, sqlx::Error> {
-        sqlx::query_as::<_, ListingForAnalysis>(
+        listing_id: i64,
+        analysis: &ListingAnalysisResult,
+        model: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
             r#"
-            SELECT id, photos, price, area, source, lat, lng,
-                   images_stored, images_count, vision_status, vision_attempts
-            FROM listings
-            WHERE images_stored = false
-              AND photos IS NOT NULL
-              AND is_active = true
-            ORDER BY fetched_at DESC
-            LIMIT $1
+            UPDATE listings
+            SET analysis_condition = $2,
+                analysis_is_shell = $3,
+                analysis_move_in_ready = $4,
+                analysis_red_flags = $5,
+                analysis_summary = $6,
+                analysis_model = $7,
+                analyzed_at = NOW()
+            WHERE id = $1
             "#,
         )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-    }
-
-    pub async fn mark_images_stored(&self, listing_id: i64, count: i32) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE listings SET images_stored = true, images_count = $2 WHERE id = $1")
-            .bind(listing_id)
-            .bind(count)
-            .execute(&self.pool)
-            .await?;
+        .bind(listing_id)
+        .bind(analysis.overall_condition)
+        .bind(analysis.is_shell)
+        .bind(analysis.move_in_ready)
+        .bind(&analysis.red_flags)
+        .bind(&analysis.summary)
+        .bind(model)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn get_pending_analysis_count(&self) -> Result<i64, sqlx::Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM listings WHERE vision_status = 'pending' AND is_active = true",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.0)
-    }
+    // ==================== Stats ====================
 
-    pub async fn get_vision_stats(&self) -> Result<VisionStats, sqlx::Error> {
-        let row: (i64, i64, i64, i64) = sqlx::query_as(
+    pub async fn get_images_stats(&self) -> Result<ImageStats, sqlx::Error> {
+        let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE vision_status = 'pending') as pending,
-                COUNT(*) FILTER (WHERE vision_status = 'done') as done,
-                COUNT(*) FILTER (WHERE vision_status = 'not_needed') as not_needed,
-                COUNT(*) FILTER (WHERE vision_status = 'failed') as failed
-            FROM listings
-            WHERE is_active = true
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                COUNT(*) FILTER (WHERE status = 'downloaded') as downloaded,
+                COUNT(*) FILTER (WHERE status = 'not_found') as not_found,
+                COUNT(*) FILTER (WHERE status = 'gone') as gone,
+                COUNT(*) FILTER (WHERE status = 'failed') as failed
+            FROM images
             "#,
         )
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(VisionStats {
-            pending: row.0,
-            done: row.1,
-            not_needed: row.2,
-            failed: row.3,
+        Ok(ImageStats {
+            total: row.0,
+            pending: row.1,
+            downloaded: row.2,
+            not_found: row.3,
+            gone: row.4,
+            failed: row.5,
         })
     }
 
-    pub async fn get_listing_by_id(
-        &self,
-        id: i64,
-    ) -> Result<Option<ListingForAnalysis>, sqlx::Error> {
-        sqlx::query_as::<_, ListingForAnalysis>(
+    pub async fn get_analysis_stats(&self) -> Result<AnalysisStats, sqlx::Error> {
+        let images_row: (i64, i64) = sqlx::query_as(
             r#"
-            SELECT id, photos, price, area, source, lat, lng,
-                   images_stored, images_count, vision_status, vision_attempts
-            FROM listings WHERE id = $1
+            SELECT
+                COUNT(*) FILTER (WHERE ai_analyzed_at IS NOT NULL) as analyzed,
+                COUNT(*) FILTER (WHERE status = 'downloaded' AND ai_analyzed_at IS NULL) as pending
+            FROM images
             "#,
         )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
+        .fetch_one(&self.pool)
+        .await?;
+
+        let listings_row: (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE analyzed_at IS NOT NULL) as analyzed,
+                COUNT(*) FILTER (WHERE analyzed_at IS NULL AND is_active = true) as pending
+            FROM listings
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(AnalysisStats {
+            images_analyzed: images_row.0,
+            images_pending: images_row.1,
+            listings_analyzed: listings_row.0,
+            listings_pending: listings_row.1,
+        })
     }
 
-    // Legacy method for compatibility
-    pub async fn get_unanalyzed_count(&self) -> Result<i64, sqlx::Error> {
-        self.get_pending_analysis_count().await
+    pub async fn get_image_count_for_listing(&self, listing_id: i64) -> Result<i64, sqlx::Error> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM images WHERE listing_id = $1")
+                .bind(listing_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
+    }
+
+    /// Mark image as failed because it's missing from S3
+    pub async fn mark_image_s3_missing(&self, image_id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE images
+            SET status = 'failed', last_error = 'Not found in S3'
+            WHERE id = $1
+            "#,
+        )
+        .bind(image_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Get paginated listings with filters
+    pub async fn get_listings_paginated(
+        &self,
+        offset: i64,
+        limit: i64,
+        min_price: Option<i64>,
+        max_price: Option<i64>,
+        rooms: Option<i32>,
+        analyzed_only: bool,
+        hide_shell: bool,
+        active_only: bool,
+    ) -> Result<(Vec<DbListing>, i64), sqlx::Error> {
+        let listings = sqlx::query_as::<_, DbListing>(
+            r#"
+            SELECT * FROM listings
+            WHERE ($1::bigint IS NULL OR price >= $1)
+              AND ($2::bigint IS NULL OR price <= $2)
+              AND ($3::int IS NULL OR rooms = $3)
+              AND ($4 = false OR analysis_condition IS NOT NULL)
+              AND ($5 = false OR analysis_is_shell IS NOT TRUE)
+              AND ($6 = false OR is_active = true)
+            ORDER BY fetched_at DESC
+            LIMIT $7 OFFSET $8
+            "#,
+        )
+        .bind(min_price)
+        .bind(max_price)
+        .bind(rooms)
+        .bind(analyzed_only)
+        .bind(hide_shell)
+        .bind(active_only)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let total: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM listings
+            WHERE ($1::bigint IS NULL OR price >= $1)
+              AND ($2::bigint IS NULL OR price <= $2)
+              AND ($3::int IS NULL OR rooms = $3)
+              AND ($4 = false OR analysis_condition IS NOT NULL)
+              AND ($5 = false OR analysis_is_shell IS NOT TRUE)
+              AND ($6 = false OR is_active = true)
+            "#,
+        )
+        .bind(min_price)
+        .bind(max_price)
+        .bind(rooms)
+        .bind(analyzed_only)
+        .bind(hide_shell)
+        .bind(active_only)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok((listings, total.0))
+    }
+
+    /// Get listing by ID
+    pub async fn get_listing_by_id(&self, id: i64) -> Result<Option<DbListing>, sqlx::Error> {
+        sqlx::query_as::<_, DbListing>("SELECT * FROM listings WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    /// Get images for a listing
+    pub async fn get_images_for_listing(&self, listing_id: i64) -> Result<Vec<DbImage>, sqlx::Error> {
+        sqlx::query_as::<_, DbImage>(
+            r#"
+            SELECT * FROM images
+            WHERE listing_id = $1
+            ORDER BY image_index
+            "#,
+        )
+        .bind(listing_id)
+        .fetch_all(&self.pool)
+        .await
     }
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct VisionStats {
+pub struct ImageStats {
+    pub total: i64,
     pub pending: i64,
-    pub done: i64,
-    pub not_needed: i64,
+    pub downloaded: i64,
+    pub not_found: i64,
+    pub gone: i64,
     pub failed: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AnalysisStats {
+    pub images_analyzed: i64,
+    pub images_pending: i64,
+    pub listings_analyzed: i64,
+    pub listings_pending: i64,
 }

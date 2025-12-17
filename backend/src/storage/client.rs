@@ -1,10 +1,9 @@
-use futures::future::join_all;
 use reqwest::Client as HttpClient;
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::debug;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -19,6 +18,9 @@ pub enum StorageError {
 
     #[error("Image not found: {0}")]
     NotFound(String),
+
+    #[error("HTTP error {status}: {message}")]
+    HttpError { status: u16, message: String },
 }
 
 impl From<s3::error::S3Error> for StorageError {
@@ -27,7 +29,19 @@ impl From<s3::error::S3Error> for StorageError {
     }
 }
 
-/// Клиент для работы с MinIO (S3-совместимое хранилище)
+/// Result of downloading a single image
+pub struct DownloadResult {
+    /// S3 key where image was stored (if successful)
+    pub s3_key: Option<String>,
+    /// HTTP status code from source
+    pub http_status: Option<u16>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+    /// Whether download was successful
+    pub success: bool,
+}
+
+/// Client for MinIO (S3-compatible storage)
 pub struct StorageClient {
     bucket: Box<Bucket>,
     http_client: HttpClient,
@@ -35,7 +49,7 @@ pub struct StorageClient {
 }
 
 impl StorageClient {
-    /// Создать клиент из переменных окружения
+    /// Create client from environment variables
     pub fn from_env(image_path_template: String) -> Result<Self, StorageError> {
         let endpoint =
             std::env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
@@ -55,7 +69,7 @@ impl StorageClient {
         )
     }
 
-    /// Создать клиент с явными параметрами
+    /// Create client with explicit parameters
     pub fn new(
         endpoint: &str,
         access_key: &str,
@@ -88,9 +102,8 @@ impl StorageClient {
         })
     }
 
-    /// Создать bucket если не существует
+    /// Ensure bucket exists
     pub async fn ensure_bucket_exists(&self) -> Result<(), StorageError> {
-        // Пробуем получить список объектов - если ошибка, создаём bucket
         match self
             .bucket
             .list("".to_string(), Some("/".to_string()))
@@ -98,7 +111,6 @@ impl StorageClient {
         {
             Ok(_) => Ok(()),
             Err(_) => {
-                // Bucket не существует, создаём
                 let creds = self.bucket.credentials().await.map_err(|e| {
                     StorageError::S3Error(format!("Failed to get credentials: {}", e))
                 })?;
@@ -115,86 +127,41 @@ impl StorageClient {
         }
     }
 
-    /// Сформировать путь для изображения
-    fn image_path(&self, listing_id: i64, index: usize) -> String {
+    /// Generate image path from template
+    fn image_path(&self, listing_id: i64, index: i32) -> String {
         self.image_path_template
             .replace("{listing_id}", &listing_id.to_string())
             .replace("{index}", &index.to_string())
     }
 
-    /// Скачать изображения с внешних URL и сохранить в MinIO
-    /// Возвращает список успешно сохранённых индексов
-    pub async fn download_and_store_images(
+    /// Download and store a single image, returning detailed result
+    pub async fn download_and_store_single(
         &self,
         listing_id: i64,
-        image_urls: &[String],
-    ) -> Result<Vec<usize>, StorageError> {
-        if image_urls.is_empty() {
-            return Ok(vec![]);
-        }
-
-        debug!(
-            "Downloading {} images for listing {}",
-            image_urls.len(),
-            listing_id
-        );
-
-        // Скачиваем все изображения параллельно
-        let download_futures: Vec<_> = image_urls
-            .iter()
-            .enumerate()
-            .map(|(idx, url)| self.download_and_store_single(listing_id, idx, url))
-            .collect();
-
-        let results = join_all(download_futures).await;
-
-        // Собираем успешные индексы
-        let successful: Vec<usize> = results
-            .into_iter()
-            .enumerate()
-            .filter_map(|(idx, result)| match result {
-                Ok(()) => Some(idx),
-                Err(e) => {
-                    warn!(
-                        "Failed to download image {} for listing {}: {}",
-                        idx, listing_id, e
-                    );
-                    None
-                }
-            })
-            .collect();
-
-        debug!(
-            "Successfully stored {}/{} images for listing {}",
-            successful.len(),
-            image_urls.len(),
-            listing_id
-        );
-
-        Ok(successful)
-    }
-
-    /// Скачать и сохранить одно изображение
-    async fn download_and_store_single(
-        &self,
-        listing_id: i64,
-        index: usize,
+        index: i32,
         url: &str,
-    ) -> Result<(), StorageError> {
-        // Скачиваем
-        let response = self
-            .http_client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| StorageError::DownloadError(format!("{}: {}", url, e)))?;
+    ) -> DownloadResult {
+        let response = match self.http_client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return DownloadResult {
+                    s3_key: None,
+                    http_status: None,
+                    error: Some(format!("Request failed: {}", e)),
+                    success: false,
+                };
+            }
+        };
+
+        let status = response.status().as_u16();
 
         if !response.status().is_success() {
-            return Err(StorageError::DownloadError(format!(
-                "{}: HTTP {}",
-                url,
-                response.status()
-            )));
+            return DownloadResult {
+                s3_key: None,
+                http_status: Some(status),
+                error: Some(format!("HTTP {}", status)),
+                success: false,
+            };
         }
 
         let content_type = response
@@ -204,22 +171,45 @@ impl StorageClient {
             .unwrap_or("image/jpeg")
             .to_string();
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| StorageError::DownloadError(format!("{}: {}", url, e)))?;
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return DownloadResult {
+                    s3_key: None,
+                    http_status: Some(status),
+                    error: Some(format!("Failed to read body: {}", e)),
+                    success: false,
+                };
+            }
+        };
 
-        // Сохраняем в MinIO
         let path = self.image_path(listing_id, index);
-        self.bucket
-            .put_object_with_content_type(&path, &bytes, &content_type)
-            .await?;
 
-        Ok(())
+        if let Err(e) = self
+            .bucket
+            .put_object_with_content_type(&path, &bytes, &content_type)
+            .await
+        {
+            return DownloadResult {
+                s3_key: None,
+                http_status: Some(status),
+                error: Some(format!("S3 upload failed: {}", e)),
+                success: false,
+            };
+        }
+
+        debug!("Stored image {}/{} to {}", listing_id, index, path);
+
+        DownloadResult {
+            s3_key: Some(path),
+            http_status: Some(status),
+            error: None,
+            success: true,
+        }
     }
 
-    /// Получить изображение из хранилища
-    pub async fn get_image(&self, listing_id: i64, index: usize) -> Result<Vec<u8>, StorageError> {
+    /// Get image from storage
+    pub async fn get_image(&self, listing_id: i64, index: i32) -> Result<Vec<u8>, StorageError> {
         let path = self.image_path(listing_id, index);
         let response = self.bucket.get_object(&path).await?;
 
@@ -230,27 +220,18 @@ impl StorageClient {
         Ok(response.to_vec())
     }
 
-    /// Получить все изображения для объявления
-    pub async fn get_all_images(&self, listing_id: i64) -> Result<Vec<Vec<u8>>, StorageError> {
-        let prefix = format!("{}/", listing_id);
-        let list = self
-            .bucket
-            .list(prefix.clone(), Some("/".to_string()))
-            .await?;
+    /// Get image by S3 key
+    pub async fn get_image_by_key(&self, s3_key: &str) -> Result<Vec<u8>, StorageError> {
+        let response = self.bucket.get_object(s3_key).await?;
 
-        let mut images = Vec::new();
-
-        for item in list.iter().flat_map(|r| r.contents.iter()) {
-            let response = self.bucket.get_object(&item.key).await?;
-            if response.status_code() == 200 {
-                images.push(response.to_vec());
-            }
+        if response.status_code() == 404 {
+            return Err(StorageError::NotFound(s3_key.to_string()));
         }
 
-        Ok(images)
+        Ok(response.to_vec())
     }
 
-    /// Проверить, есть ли изображения для объявления
+    /// Check if images exist for listing
     pub async fn has_images(&self, listing_id: i64) -> Result<bool, StorageError> {
         let prefix = format!("{}/", listing_id);
         let list = self.bucket.list(prefix, Some("/".to_string())).await?;
@@ -258,7 +239,7 @@ impl StorageClient {
         Ok(list.iter().any(|r| !r.contents.is_empty()))
     }
 
-    /// Получить количество изображений для объявления
+    /// Count images for listing
     pub async fn count_images(&self, listing_id: i64) -> Result<usize, StorageError> {
         let prefix = format!("{}/", listing_id);
         let list = self.bucket.list(prefix, Some("/".to_string())).await?;
@@ -266,7 +247,7 @@ impl StorageClient {
         Ok(list.iter().map(|r| r.contents.len()).sum())
     }
 
-    /// Удалить все изображения объявления
+    /// Delete all images for listing
     pub async fn delete_images(&self, listing_id: i64) -> Result<usize, StorageError> {
         let prefix = format!("{}/", listing_id);
         let list = self
@@ -289,16 +270,28 @@ impl StorageClient {
         Ok(count)
     }
 
-    /// Получить presigned URL для изображения (для отдачи клиенту)
+    /// Get presigned URL for image
     pub async fn get_presigned_url(
         &self,
         listing_id: i64,
-        index: usize,
+        index: i32,
         expires_secs: u32,
     ) -> Result<String, StorageError> {
         let path = self.image_path(listing_id, index);
         self.bucket
             .presign_get(&path, expires_secs, None)
+            .await
+            .map_err(|e| StorageError::S3Error(e.to_string()))
+    }
+
+    /// Get presigned URL by S3 key
+    pub async fn get_presigned_url_by_key(
+        &self,
+        s3_key: &str,
+        expires_secs: u32,
+    ) -> Result<String, StorageError> {
+        self.bucket
+            .presign_get(s3_key, expires_secs, None)
             .await
             .map_err(|e| StorageError::S3Error(e.to_string()))
     }

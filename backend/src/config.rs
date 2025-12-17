@@ -10,29 +10,29 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct ApiConfig {
-    /// Интервал сбора данных в минутах
+    /// Collection interval in minutes
     #[serde(default = "default_collect_interval")]
     pub collect_interval_minutes: u32,
 
-    /// Задержка между запросами к API в секундах
+    /// Delay between API requests in seconds
     #[serde(default = "default_request_delay")]
     pub request_delay_seconds: u32,
 
-    /// Настройки синхронизации актуальности
+    /// Actuality sync settings
     #[serde(default)]
     pub sync: ApiSyncConfig,
 
-    /// Параметры запроса к API
+    /// API query parameters
     pub query: ApiQueryConfig,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ApiSyncConfig {
-    /// Включена ли синхронизация актуальности
+    /// Enable actuality sync
     #[serde(default = "default_sync_enabled")]
     pub enabled: bool,
 
-    /// Интервал проверки актуальности в часах
+    /// Sync interval in hours
     #[serde(default = "default_sync_interval")]
     pub interval_hours: u32,
 }
@@ -64,51 +64,51 @@ fn default_request_delay() -> u32 {
 
 #[derive(Debug, Deserialize)]
 pub struct ApiQueryConfig {
-    /// ID категории (2 = квартиры)
+    /// Category ID (2 = apartments)
     pub category_id: i32,
 
-    /// Тип сделки (1 = продам)
+    /// Deal type (1 = sell)
     pub nedvigimost_type: i32,
 
-    /// Город/регион
+    /// City/region
     pub city: String,
 
-    /// Фильтр актуальности
+    /// Actuality filter
     #[serde(default)]
     pub is_actual: Option<String>,
 
-    /// Цена от
+    /// Price from
     #[serde(default)]
     pub price1: Option<i64>,
 
-    /// Цена до
+    /// Price to
     #[serde(default)]
     pub price2: Option<i64>,
 
-    /// Площадь от (м²)
+    /// Area from (m²)
     #[serde(default)]
     pub area_from: Option<i32>,
 
-    /// Площадь до (м²)
+    /// Area to (m²)
     #[serde(default)]
     pub area_to: Option<i32>,
 
-    /// Тип продавца
+    /// Seller type
     #[serde(default)]
     pub person_type: Option<i32>,
 
-    /// Источники (1=avito, 4=cian)
+    /// Sources (1=avito, 4=cian)
     #[serde(default)]
     pub source: Option<String>,
 
-    /// Только с координатами
+    /// Only with coordinates
     #[serde(default)]
     pub withcoords: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StorageConfig {
-    /// Шаблон пути для изображений
+    /// Image path template
     #[serde(default = "default_image_path_template")]
     pub image_path_template: String,
 }
@@ -119,73 +119,74 @@ fn default_image_path_template() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct VisionConfig {
-    /// Включить автоматический анализ после сбора
+    /// Enable automatic analysis after collection
     #[serde(default)]
     pub auto_analyze: bool,
 
-    /// Модель для анализа
-    #[serde(default = "default_vision_model")]
-    pub model: String,
+    /// Model for per-image analysis (first layer)
+    #[serde(default = "default_image_model")]
+    pub image_model: String,
 
-    /// Максимум попыток перед статусом failed
+    /// Model for listing-level analysis (second layer)
+    #[serde(default = "default_listing_model")]
+    pub listing_model: String,
+
+    /// Max retries before failed status
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
 
-    /// Максимум изображений в одном запросе
-    #[serde(default = "default_max_images")]
-    pub max_images_per_request: usize,
-
-    /// Фильтрация перед анализом
+    /// Pre-analysis filter
+    #[serde(default)]
     pub filter: VisionFilterConfig,
 }
 
-fn default_vision_model() -> String {
-    "google/gemini-2.0-flash-lite-001".to_string()
+fn default_image_model() -> String {
+    "google/gemma-3-4b-it".to_string()
+}
+
+fn default_listing_model() -> String {
+    "google/gemini-2.5-flash-lite".to_string()
 }
 
 fn default_max_retries() -> u32 {
     3
 }
 
-fn default_max_images() -> usize {
-    10
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct VisionFilterConfig {
-    /// Включена ли фильтрация
+    /// Enable filtering
     #[serde(default = "default_filter_enabled")]
     pub enabled: bool,
 
-    /// Минимум фото
+    /// Minimum photos
     #[serde(default = "default_min_photos")]
     pub min_photos: usize,
 
-    /// Максимум фото для анализа
+    /// Maximum photos to analyze
     #[serde(default)]
     pub max_photos: Option<usize>,
 
-    /// Минимальная цена
+    /// Minimum price
     #[serde(default)]
     pub min_price: Option<i64>,
 
-    /// Максимальная цена
+    /// Maximum price
     #[serde(default)]
     pub max_price: Option<i64>,
 
-    /// Минимальная площадь
+    /// Minimum area
     #[serde(default)]
     pub min_area: Option<f64>,
 
-    /// Максимальная площадь
+    /// Maximum area
     #[serde(default)]
     pub max_area: Option<f64>,
 
-    /// Разрешённые источники
+    /// Allowed sources
     #[serde(default)]
     pub sources: Option<Vec<String>>,
 
-    /// Требовать координаты
+    /// Require coordinates
     #[serde(default)]
     pub require_coords: bool,
 }
@@ -199,7 +200,7 @@ fn default_min_photos() -> usize {
 }
 
 impl Config {
-    /// Загрузить конфигурацию из файла
+    /// Load config from file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ConfigError::FileRead(e.to_string()))?;
@@ -207,7 +208,7 @@ impl Config {
         toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
-    /// Загрузить из стандартного пути (config.toml)
+    /// Load from default path (config.toml)
     pub fn load_default() -> Result<Self, ConfigError> {
         Self::load("config.toml")
     }
@@ -223,7 +224,7 @@ pub enum ConfigError {
 }
 
 impl VisionFilterConfig {
-    /// Проверить, проходит ли объявление фильтр
+    /// Check if listing passes filter
     pub fn passes_filter(
         &self,
         photos_count: usize,
@@ -236,12 +237,10 @@ impl VisionFilterConfig {
             return true;
         }
 
-        // Проверка минимума фото
         if photos_count < self.min_photos {
             return false;
         }
 
-        // Проверка цены
         if let Some(min_price) = self.min_price {
             if price.map(|p| p < min_price).unwrap_or(true) {
                 return false;
@@ -253,7 +252,6 @@ impl VisionFilterConfig {
             }
         }
 
-        // Проверка площади
         if let Some(min_area) = self.min_area {
             if area.map(|a| a < min_area).unwrap_or(true) {
                 return false;
@@ -265,7 +263,6 @@ impl VisionFilterConfig {
             }
         }
 
-        // Проверка источника
         if let Some(allowed_sources) = &self.sources {
             if let Some(src) = source {
                 if !allowed_sources.iter().any(|s| s.eq_ignore_ascii_case(src)) {
@@ -276,7 +273,6 @@ impl VisionFilterConfig {
             }
         }
 
-        // Проверка координат
         if self.require_coords && !has_coords {
             return false;
         }
@@ -294,13 +290,7 @@ mod tests {
         let filter = VisionFilterConfig {
             enabled: true,
             min_photos: 3,
-            max_photos: None,
-            min_price: None,
-            max_price: None,
-            min_area: None,
-            max_area: None,
-            sources: None,
-            require_coords: false,
+            ..Default::default()
         };
 
         assert!(!filter.passes_filter(2, None, None, None, false));
@@ -313,13 +303,9 @@ mod tests {
         let filter = VisionFilterConfig {
             enabled: true,
             min_photos: 1,
-            max_photos: None,
             min_price: Some(1_000_000),
             max_price: Some(5_000_000),
-            min_area: None,
-            max_area: None,
-            sources: None,
-            require_coords: false,
+            ..Default::default()
         };
 
         assert!(!filter.passes_filter(1, Some(500_000), None, None, false));
@@ -332,16 +318,11 @@ mod tests {
         let filter = VisionFilterConfig {
             enabled: false,
             min_photos: 10,
-            max_photos: None,
             min_price: Some(100_000_000),
-            max_price: None,
-            min_area: None,
-            max_area: None,
-            sources: None,
             require_coords: true,
+            ..Default::default()
         };
 
-        // Даже с невыполнимыми условиями, фильтр пропускает всё
         assert!(filter.passes_filter(0, Some(100), None, None, false));
     }
 }

@@ -1,38 +1,43 @@
 use base64::Engine;
-use futures::future::join_all;
 use reqwest::Client;
 use thiserror::Error;
 use tracing::{debug, warn};
 
 use super::client::{OpenRouterClient, OpenRouterError};
-use super::models::VisionAnalysis;
+use crate::db::ImageAnalysisResult;
 
-const ANALYSIS_PROMPT: &str = r#"Analyze these real estate apartment photos and respond ONLY with valid JSON (no markdown, no extra text).
-Be objective. Base answers ONLY on what is visible in the photos; if not enough evidence, use "unknown" with low confidence.
-Provide confidence scores 0.0-1.0 for every field.
+const IMAGE_ANALYSIS_PROMPT: &str = r#"Analyze this apartment photo. JSON only, no markdown.
 
-JSON schema:
 {
-  "condition": { "state": "bare_walls|needs_renovation|livable|good|excellent|unknown", "confidence": 0.0 },
-  "renovation": { "type": "none|cosmetic|standard|euro|designer|unknown", "confidence": 0.0 },
-  "is_empty_shell": { "value": true|false|unknown, "confidence": 0.0 },
-  "furniture": { "value": true|false|unknown, "confidence": 0.0 },
-  "appliances": { "value": true|false|unknown, "confidence": 0.0 },
-  "move_in_ready": { "value": true|false|unknown, "confidence": 0.0 },
-  "overall_score": { "value": 1-10, "confidence": 0.0 },
-  "images_used": { "value": 0, "confidence": 1.0 },
-  "evidence": ["short visual cues, e.g. 'bare concrete walls', 'no flooring', 'installed toilet', 'finished kitchen'"],
-  "notes": "brief neutral notes",
-  "contradictions": ["optional: if photos show mixed states (e.g. one room finished, another bare shell)"]
+  "image_type": "interior|exterior|floor_plan|other",
+  "room": "bathroom|kitchen|living|bedroom|hallway|null",
+  "condition": 0-100 or null,
+  "confidence": 0-100,
+  "issues": [],
+  "description": "string"
 }
 
-Definitions:
-- is_empty_shell=true ONLY if clear signs of no finishes are visible (bare concrete/brick walls, no flooring, exposed wiring/plumbing, unfinished ceilings).
-- move_in_ready=true ONLY if finishes are complete AND at least one functional bathroom is visible AND either a kitchen area or cooking setup is visible; otherwise false/unknown.
-- renovation.type: none = no finishes; cosmetic = repaint/wallpaper/laminate without major overhaul; standard = typical finished interior; euro/designer only if high quality materials/details are clearly visible; otherwise standard/unknown."#;
+image_type:
+- interior: room inside apartment
+- exterior: building, yard, street view
+- floor_plan: схема, plan drawing
+- other: documents, unclear, unrelated
 
-/// Maximum number of images to send in one request
-const MAX_IMAGES: usize = 10;
+room: Which room is shown. Set null if not interior.
+
+condition: Apartment finish quality, 0-100. Set null if not interior.
+- 0 = bare shell (concrete walls, cement floor, exposed pipes/wires, no finishes)
+- 25 = needs major renovation (very old, damaged, partially unfinished)
+- 50 = needs cosmetic renovation (dated finishes, worn but functional)
+- 75 = good condition (decent finishes, minor wear)
+- 100 = excellent (new renovation, move-in ready)
+
+confidence: Your certainty in this assessment, 0-100.
+
+issues: Visible problems. Empty array if none.
+Examples: water damage, mold, cracks, broken tiles, peeling paint.
+
+description: One sentence describing what you see."#;
 
 /// Maximum image size in bytes (5MB)
 const MAX_IMAGE_SIZE: usize = 5 * 1024 * 1024;
@@ -48,18 +53,18 @@ pub enum AnalyzerError {
     #[error("Failed to parse analysis result: {0}")]
     ParseError(String),
 
-    #[error("No images to analyze")]
-    NoImages,
+    #[error("Image too large")]
+    ImageTooLarge,
 }
 
-/// Анализатор изображений квартир
-pub struct VisionAnalyzer {
+/// Per-image analyzer using gemma-3-4b-it
+pub struct ImageAnalyzer {
     openrouter: OpenRouterClient,
     http_client: Client,
 }
 
-impl VisionAnalyzer {
-    pub fn new(openrouter_api_key: String) -> Self {
+impl ImageAnalyzer {
+    pub fn new(api_key: String, model: String) -> Self {
         let http_client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .timeout(std::time::Duration::from_secs(30))
@@ -67,20 +72,7 @@ impl VisionAnalyzer {
             .expect("Failed to create HTTP client");
 
         Self {
-            openrouter: OpenRouterClient::new(openrouter_api_key),
-            http_client,
-        }
-    }
-
-    pub fn with_model(openrouter_api_key: String, model: String) -> Self {
-        let http_client = Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self {
-            openrouter: OpenRouterClient::new(openrouter_api_key).with_model(&model),
+            openrouter: OpenRouterClient::new(api_key, model),
             http_client,
         }
     }
@@ -89,57 +81,25 @@ impl VisionAnalyzer {
         self.openrouter.model()
     }
 
-    /// Анализировать квартиру по URL изображений
-    pub async fn analyze(&self, image_urls: &[String]) -> Result<VisionAnalysis, AnalyzerError> {
-        if image_urls.is_empty() {
-            return Err(AnalyzerError::NoImages);
-        }
+    /// Analyze a single image from URL
+    pub async fn analyze_from_url(&self, image_url: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
+        let image_base64 = self.download_image(image_url).await?;
+        self.analyze_base64(&image_base64).await
+    }
 
-        // Ограничиваем количество изображений
-        let urls_to_fetch: Vec<_> = image_urls.iter().take(MAX_IMAGES).collect();
+    /// Analyze a single image from base64
+    pub async fn analyze_base64(&self, image_base64: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
+        debug!("Sending image to OpenRouter for analysis");
 
-        debug!("Downloading {} images for analysis", urls_to_fetch.len());
-
-        // Скачиваем все изображения параллельно
-        let download_futures: Vec<_> = urls_to_fetch
-            .iter()
-            .map(|url| self.download_image(url))
-            .collect();
-
-        let results = join_all(download_futures).await;
-
-        // Фильтруем успешно скачанные
-        let images_base64: Vec<String> = results
-            .into_iter()
-            .filter_map(|r| match r {
-                Ok(img) => Some(img),
-                Err(e) => {
-                    warn!("Failed to download image: {}", e);
-                    None
-                }
-            })
-            .collect();
-
-        if images_base64.is_empty() {
-            return Err(AnalyzerError::NoImages);
-        }
-
-        debug!(
-            "Successfully downloaded {} images, sending to OpenRouter",
-            images_base64.len()
-        );
-
-        // Отправляем на анализ
         let response = self
             .openrouter
-            .analyze_images(images_base64, ANALYSIS_PROMPT)
+            .analyze_image(image_base64, IMAGE_ANALYSIS_PROMPT)
             .await?;
 
-        // Парсим JSON ответ
         self.parse_response(&response)
     }
 
-    /// Скачать изображение и конвертировать в base64
+    /// Download image and convert to base64
     async fn download_image(&self, url: &str) -> Result<String, AnalyzerError> {
         let response = self
             .http_client
@@ -161,21 +121,16 @@ impl VisionAnalyzer {
             .await
             .map_err(|e| AnalyzerError::DownloadFailed(format!("{}: {}", url, e)))?;
 
-        // Проверяем размер
         if bytes.len() > MAX_IMAGE_SIZE {
-            return Err(AnalyzerError::DownloadFailed(format!(
-                "{}: image too large ({} bytes)",
-                url,
-                bytes.len()
-            )));
+            return Err(AnalyzerError::ImageTooLarge);
         }
 
         Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
 
-    /// Распарсить JSON ответ от модели
-    fn parse_response(&self, response: &str) -> Result<VisionAnalysis, AnalyzerError> {
-        // Убираем возможные markdown-обёртки
+    /// Parse JSON response from model
+    fn parse_response(&self, response: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
+        // Remove possible markdown wrappers
         let json_str = response
             .trim()
             .trim_start_matches("```json")
@@ -183,51 +138,69 @@ impl VisionAnalyzer {
             .trim_end_matches("```")
             .trim();
 
-        // Сначала парсим как serde_json::Value для нормализации
+        // Parse as raw JSON first for flexibility
         let raw: serde_json::Value = serde_json::from_str(json_str)
-            .map_err(|e| AnalyzerError::ParseError(format!("Invalid JSON: {}", e)))?;
+            .map_err(|e| AnalyzerError::ParseError(format!("Invalid JSON: {} - Response: {}", e, json_str)))?;
 
-        // Нормализуем поля (модель может использовать разные названия)
-        let normalized = self.normalize_response(raw)?;
-
-        serde_json::from_value(normalized)
-            .map_err(|e| AnalyzerError::ParseError(format!("Failed to deserialize: {}", e)))
-    }
-
-    /// Нормализовать ответ модели в ожидаемый формат
-    fn normalize_response(
-        &self,
-        mut raw: serde_json::Value,
-    ) -> Result<serde_json::Value, AnalyzerError> {
         let obj = raw
-            .as_object_mut()
+            .as_object()
             .ok_or_else(|| AnalyzerError::ParseError("Response is not an object".to_string()))?;
 
-        // Нормализуем renovation.type -> renovation.renovation_type
-        if let Some(renovation) = obj.get_mut("renovation") {
-            if let Some(renovation_obj) = renovation.as_object_mut() {
-                if let Some(type_val) = renovation_obj.remove("type") {
-                    renovation_obj.insert("renovation_type".to_string(), type_val);
-                }
-            }
-        }
+        // Extract fields with defaults
+        let image_type = obj
+            .get("image_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("other")
+            .to_string();
 
-        // Нормализуем boolean поля (value -> value для furniture, appliances и т.д.)
-        for field in ["furniture", "appliances", "is_empty_shell", "move_in_ready"] {
-            if let Some(field_val) = obj.get_mut(field) {
-                if let Some(field_obj) = field_val.as_object_mut() {
-                    // Если есть has_furniture/has_appliances - переименовать в value
-                    if let Some(val) = field_obj.remove(&format!("has_{}", field)) {
-                        field_obj.insert("value".to_string(), val);
-                    }
-                    // Если поле "present" вместо "value"
-                    if let Some(val) = field_obj.remove("present") {
-                        field_obj.insert("value".to_string(), val);
-                    }
+        let room = obj
+            .get("room")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str().map(|s| s.to_string())
                 }
-            }
-        }
+            });
 
-        Ok(raw)
+        let condition = obj
+            .get("condition")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_i64().map(|n| n as i32)
+                }
+            });
+
+        let confidence = obj
+            .get("confidence")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(50) as i32;
+
+        let issues: Vec<String> = obj
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let description = obj
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No description")
+            .to_string();
+
+        Ok(ImageAnalysisResult {
+            image_type,
+            room,
+            condition,
+            confidence,
+            issues,
+            description,
+        })
     }
 }

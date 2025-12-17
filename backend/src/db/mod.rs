@@ -2,7 +2,7 @@ pub mod models;
 pub mod repository;
 
 pub use models::{
-    CollectionConfig, CollectionState, DbListing, ListingForAnalysis, NewCollectionConfig,
-    VisionStatus,
+    CollectionConfig, CollectionState, DbImage, DbListing, ImageAnalysisResult, ImageForAnalysis,
+    ImageForDownload, ImageStatus, ListingAnalysisResult, ListingForAnalysis, NewCollectionConfig,
 };
-pub use repository::Repository;
+pub use repository::{AnalysisStats, ImageStats, Repository};

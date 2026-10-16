@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO listings (\n                id, source, url, title, description, price, city, address,\n                lat, lng, rooms, area, floor, floors_total, person_type,\n                params, time_created, time_updated, fetched_at, is_active\n            ) VALUES (\n                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20\n            )\n            ON CONFLICT (id) DO UPDATE SET\n                source = EXCLUDED.source,\n                url = EXCLUDED.url,\n                title = EXCLUDED.title,\n                description = EXCLUDED.description,\n                price = EXCLUDED.price,\n                city = EXCLUDED.city,\n                address = EXCLUDED.address,\n                lat = EXCLUDED.lat,\n                lng = EXCLUDED.lng,\n                rooms = EXCLUDED.rooms,\n                area = EXCLUDED.area,\n                floor = EXCLUDED.floor,\n                floors_total = EXCLUDED.floors_total,\n                person_type = EXCLUDED.person_type,\n                params = EXCLUDED.params,\n                time_created = EXCLUDED.time_created,\n                time_updated = EXCLUDED.time_updated,\n                fetched_at = EXCLUDED.fetched_at,\n                is_active = EXCLUDED.is_active\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Float8",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Jsonb",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c709f47c0bb11809304a1b6ae5ae4daada8e9adbae0bef20a89d815412c098b5"
+}

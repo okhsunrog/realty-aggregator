@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE collection_state SET last_collection_at = NOW() WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8295ddac8760b9e3e951cd4847965a2de4ad8a0a0ca6d53437b2e363585e1389"
+}

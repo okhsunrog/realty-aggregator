@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE images\n            SET status = $2,\n                s3_key = COALESCE($3, s3_key),\n                http_status = COALESCE($4, http_status),\n                last_error = $5,\n                download_attempts = download_attempts + 1,\n                downloaded_at = COALESCE($6, downloaded_at)\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        {
+          "Custom": {
+            "name": "image_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "downloaded",
+                "not_found",
+                "gone",
+                "failed"
+              ]
+            }
+          }
+        },
+        "Text",
+        "Int4",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "366bd81b7ed4fa254c068fafe24519880cf8edf335f44bf1c756978dc1937939"
+}

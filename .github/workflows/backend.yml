@@ -1,0 +1,53 @@
+name: Backend
+
+on:
+  push:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: realty_check
+          POSTGRES_PASSWORD: realty_check
+          POSTGRES_DB: realty_check
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U realty_check -d realty_check"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://realty_check:realty_check@localhost:5432/realty_check
+      SQLX_OFFLINE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check all targets using committed metadata
+        run: cargo check --all-targets --locked
+      - name: Install SQLx CLI
+        run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
+      - name: Apply migrations to a fresh database
+        run: cargo sqlx migrate run
+      - name: Check query metadata against migrations
+        env:
+          SQLX_OFFLINE: 'false'
+        run: cargo sqlx prepare --check -- --all-targets --locked
+      - name: Run unit and repository tests
+        run: cargo test --lib --test repository --locked

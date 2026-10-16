@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, listing_id, image_index, source_url, s3_key\n            FROM images\n            WHERE status = 'downloaded'\n              AND ai_analyzed_at IS NULL\n            ORDER BY listing_id, image_index\n            LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "listing_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "source_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "s3_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "49c7d966bdd62dcaf05c9a76446f0cf61014e167c3320fba56ba3ac51e8b4b66"
+}

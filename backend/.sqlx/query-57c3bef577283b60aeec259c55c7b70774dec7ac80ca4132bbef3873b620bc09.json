@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE analyzed_at IS NOT NULL) AS \"analyzed!\",\n                COUNT(*) FILTER (WHERE analyzed_at IS NULL AND is_active = true) AS \"pending!\"\n            FROM listings\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "analyzed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "57c3bef577283b60aeec259c55c7b70774dec7ac80ca4132bbef3873b620bc09"
+}

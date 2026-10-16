@@ -3,6 +3,7 @@ use std::sync::Arc;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use tokio_cron_scheduler::{Job, JobScheduler};
+use tokio_shutdown::Shutdown;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -84,8 +85,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Initialize Vision Analyzers (optional)
-    let openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
-    let (image_analyzer, listing_analyzer) = match &openrouter_api_key {
+    let vision_api_key = std::env::var(&config.vision.api_key_env)
+        .ok()
+        .filter(|key| !key.trim().is_empty());
+    let (image_analyzer, listing_analyzer) = match &vision_api_key {
         Some(key) => {
             tracing::info!(
                 "Image analyzer initialized with model: {}",
@@ -99,15 +102,20 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(ImageAnalyzer::new(
                     key.clone(),
                     config.vision.image_model.clone(),
+                    config.vision.api_base_url.clone(),
                 ))),
                 Some(Arc::new(ListingAnalyzer::new(
                     key.clone(),
                     config.vision.listing_model.clone(),
+                    config.vision.api_base_url.clone(),
                 ))),
             )
         }
         None => {
-            tracing::warn!("OPENROUTER_API_KEY not set. Vision analysis disabled.");
+            tracing::warn!(
+                key_env = %config.vision.api_key_env,
+                "API key not set. Vision analysis disabled."
+            );
             (None, None)
         }
     };
@@ -122,10 +130,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(analyzer) = listing_analyzer {
         collector = collector.with_listing_analyzer(analyzer);
     }
+    if let Some(key) = vision_api_key {
+        collector = collector.with_vision_api_key(key);
+    }
     let collector = Arc::new(collector);
 
     // Setup scheduler
-    let scheduler = JobScheduler::new().await?;
+    let mut scheduler = JobScheduler::new().await?;
 
     // Collection job - run at configured interval
     let collect_interval = config.api.collect_interval_minutes;
@@ -215,8 +226,22 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("Server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Setup graceful shutdown
+    let shutdown = Shutdown::new().expect("Failed to create shutdown handler");
+    let shutdown_signal = shutdown.handle();
 
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal.await;
+            tracing::info!("Shutdown signal received, starting graceful shutdown...");
+        })
+        .await?;
+
+    // Shutdown scheduler
+    tracing::info!("Shutting down scheduler...");
+    scheduler.shutdown().await?;
+
+    tracing::info!("Graceful shutdown complete");
     Ok(())
 }

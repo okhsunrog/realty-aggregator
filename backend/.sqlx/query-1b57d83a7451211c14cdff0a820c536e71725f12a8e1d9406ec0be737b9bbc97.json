@@ -1,0 +1,178 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, source, url, title, description, price, city, address,\n                   lat, lng, rooms, area, floor, floors_total, person_type, params,\n                   time_created, time_updated, fetched_at, is_active,\n                   analysis_condition, analysis_is_shell, analysis_move_in_ready,\n                   analysis_red_flags, analysis_summary, analysis_model,\n                   analyzed_at AS analysis_analyzed_at\n            FROM listings WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "price",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "city",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "lat",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "lng",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "rooms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "area",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "floor",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "floors_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "person_type",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "params",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
+        "name": "time_created",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "time_updated",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "fetched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "analysis_condition",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 21,
+        "name": "analysis_is_shell",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 22,
+        "name": "analysis_move_in_ready",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 23,
+        "name": "analysis_red_flags",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 24,
+        "name": "analysis_summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 25,
+        "name": "analysis_model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 26,
+        "name": "analysis_analyzed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "1b57d83a7451211c14cdff0a820c536e71725f12a8e1d9406ec0be737b9bbc97"
+}

@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", download_attempts\n            FROM images\n            WHERE status = 'pending'\n               OR (status = 'not_found' AND download_attempts < 2)\n            ORDER BY listing_id, image_index\n            LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "listing_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "source_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "status: ImageStatus",
+        "type_info": {
+          "Custom": {
+            "name": "image_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "downloaded",
+                "not_found",
+                "gone",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "download_attempts",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0b2bfec56da2479ad86d215685084431327a6ef2cc8ce35b91157f77fee64af3"
+}

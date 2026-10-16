@@ -3,7 +3,7 @@ use reqwest::Client;
 use thiserror::Error;
 use tracing::{debug, warn};
 
-use super::client::{OpenRouterClient, OpenRouterError};
+use super::client::{OpenAiClient, OpenAiError};
 use crate::db::ImageAnalysisResult;
 
 const IMAGE_ANALYSIS_PROMPT: &str = r#"Analyze this apartment photo. JSON only, no markdown.
@@ -47,8 +47,8 @@ pub enum AnalyzerError {
     #[error("Failed to download image: {0}")]
     DownloadFailed(String),
 
-    #[error("OpenRouter API error: {0}")]
-    ApiError(#[from] OpenRouterError),
+    #[error("OpenAI-compatible API API error: {0}")]
+    ApiError(#[from] OpenAiError),
 
     #[error("Failed to parse analysis result: {0}")]
     ParseError(String),
@@ -57,14 +57,14 @@ pub enum AnalyzerError {
     ImageTooLarge,
 }
 
-/// Per-image analyzer using gemma-3-4b-it
+/// Per-image analyzer using the configured vision model
 pub struct ImageAnalyzer {
-    openrouter: OpenRouterClient,
+    vision_api: OpenAiClient,
     http_client: Client,
 }
 
 impl ImageAnalyzer {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, api_base_url: String) -> Self {
         let http_client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .timeout(std::time::Duration::from_secs(30))
@@ -72,13 +72,13 @@ impl ImageAnalyzer {
             .expect("Failed to create HTTP client");
 
         Self {
-            openrouter: OpenRouterClient::new(api_key, model),
+            vision_api: OpenAiClient::new(api_key, model, api_base_url),
             http_client,
         }
     }
 
     pub fn model(&self) -> &str {
-        self.openrouter.model()
+        self.vision_api.model()
     }
 
     /// Analyze a single image from URL
@@ -89,10 +89,10 @@ impl ImageAnalyzer {
 
     /// Analyze a single image from base64
     pub async fn analyze_base64(&self, image_base64: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
-        debug!("Sending image to OpenRouter for analysis");
+        debug!("Sending image to OpenAI-compatible API for analysis");
 
         let response = self
-            .openrouter
+            .vision_api
             .analyze_image(image_base64, IMAGE_ANALYSIS_PROMPT)
             .await?;
 

@@ -1,191 +1,67 @@
+use std::path::PathBuf;
+
+use backend::config::Config;
+use backend::db::{DbImage, ImageStatus, ListingForAnalysis};
+use backend::vision::{ImageAnalyzer, ListingAnalyzer};
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use clap::Parser;
 
-const ANALYSIS_PROMPT: &str = r#"Analyze this real estate apartment photo and provide a JSON response with the following structure. Be objective and provide confidence scores (0.0-1.0) for each assessment.
-
-{
-  "apartment_condition": {
-    "state": "bare_walls|needs_renovation|livable|good|excellent",
-    "confidence": 0.0-1.0,
-    "description": "brief description"
-  },
-  "renovation_type": {
-    "type": "none|cosmetic|standard|euro|designer",
-    "confidence": 0.0-1.0
-  },
-  "is_new_construction_empty": {
-    "value": true/false,
-    "confidence": 0.0-1.0,
-    "description": "if true, describe why (bare concrete, no finishes, etc)"
-  },
-  "furniture": {
-    "has_furniture": true/false,
-    "confidence": 0.0-1.0,
-    "items": ["list", "of", "visible", "furniture"]
-  },
-  "appliances": {
-    "has_appliances": true/false,
-    "confidence": 0.0-1.0,
-    "items": ["list", "of", "visible", "appliances"]
-  },
-  "room_type": {
-    "type": "kitchen|living_room|bedroom|bathroom|hallway|balcony|other",
-    "confidence": 0.0-1.0
-  },
-  "photo_quality": {
-    "quality": "poor|amateur|decent|professional",
-    "confidence": 0.0-1.0
-  },
-  "window_view": {
-    "visible": true/false,
-    "description": "what can be seen if visible"
-  },
-  "overall_livability": {
-    "score": 1-10,
-    "confidence": 0.0-1.0,
-    "can_move_in_immediately": true/false
-  }
-}
-
-IMPORTANT:
-- "bare_walls" = completely unfinished, concrete/brick walls, no flooring
-- "needs_renovation" = has some finishes but in poor condition
-- "livable" = basic finishes, can live but dated
-- "good" = modern finishes, well maintained
-- "excellent" = high-end finishes, designer quality
-
-Respond ONLY with valid JSON, no other text."#;
-
-#[derive(Debug, Serialize)]
-struct OpenRouterRequest {
-    model: String,
-    messages: Vec<Message>,
-    max_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct Message {
-    role: String,
-    content: Vec<Content>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum Content {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrl },
-}
-
-#[derive(Debug, Serialize)]
-struct ImageUrl {
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenRouterResponse {
-    choices: Option<Vec<Choice>>,
-    error: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
-    content: String,
+#[derive(Parser)]
+#[command(about = "Analyze a JPEG with both configured model layers without changing the database")]
+struct Args {
+    image: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    let args = Args::parse();
+    let config = Config::load_default()?;
+    let api_key = std::env::var(&config.vision.api_key_env)
+        .map_err(|_| anyhow::anyhow!("{} is not set", config.vision.api_key_env))?;
+    let image = std::fs::read(&args.image)?;
+    anyhow::ensure!(
+        image.starts_with(&[0xff, 0xd8, 0xff]),
+        "Provide a JPEG image"
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode(image);
+    let image_analyzer = ImageAnalyzer::new(
+        api_key.clone(),
+        config.vision.image_model.clone(),
+        config.vision.api_base_url.clone(),
+    );
+    let image_analysis = image_analyzer.analyze_base64(&encoded).await?;
+    println!("Image analysis ({}):", image_analyzer.model());
+    println!("{}", serde_json::to_string_pretty(&image_analysis)?);
 
-    let openrouter_key =
-        std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY not set in .env");
-
-    // Читаем тестовое изображение
-    let image_path = "/tmp/realty_images/test_image.jpg";
-    let image_bytes = std::fs::read(image_path)?;
-    let base64_image = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-    println!("Изображение загружено: {} байт", image_bytes.len());
-    println!("Отправляем на анализ...\n");
-
-    let client = reqwest::Client::new();
-
-    // Используем Gemini Flash - быстрый и дешёвый
-    let model = "google/gemini-2.0-flash-lite-001";
-
-    let request = OpenRouterRequest {
-        model: model.to_string(),
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: vec![
-                Content::ImageUrl {
-                    image_url: ImageUrl {
-                        url: format!("data:image/jpeg;base64,{}", base64_image),
-                    },
-                },
-                Content::Text {
-                    text: ANALYSIS_PROMPT.to_string(),
-                },
-            ],
-        }],
-        max_tokens: 1500,
-    };
-
-    let response = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", openrouter_key))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let text = response.text().await?;
-
-    if !status.is_success() {
-        println!("Ошибка API: {} - {}", status, text);
-        return Ok(());
-    }
-
-    let parsed: OpenRouterResponse = serde_json::from_str(&text)?;
-
-    if let Some(error) = parsed.error {
-        println!("API Error: {:?}", error);
-        return Ok(());
-    }
-
-    if let Some(choices) = parsed.choices {
-        if let Some(choice) = choices.first() {
-            println!("=== Результат анализа ===\n");
-            println!("Модель: {}\n", model);
-
-            // Пробуем распарсить JSON
-            let content = &choice.message.content;
-
-            // Убираем возможные markdown-обёртки
-            let json_str = content
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
-
-            match serde_json::from_str::<serde_json::Value>(json_str) {
-                Ok(json) => {
-                    println!("{}", serde_json::to_string_pretty(&json)?);
-                }
-                Err(_) => {
-                    println!("Raw response:\n{}", content);
-                }
-            }
-        }
-    }
-
+    // Synthetic inputs verify the second layer without collecting real listings.
+    let image_record: DbImage = serde_json::from_value(serde_json::json!({
+        "id": 1,
+        "listing_id": 1,
+        "image_index": 0,
+        "source_url": "https://example.test/photo.jpg",
+        "status": ImageStatus::Downloaded,
+        "download_attempts": 1,
+        "ai_image_type": image_analysis.image_type,
+        "ai_room": image_analysis.room,
+        "ai_condition": image_analysis.condition,
+        "ai_confidence": image_analysis.confidence,
+        "ai_issues": image_analysis.issues,
+        "ai_description": image_analysis.description
+    }))?;
+    let listing: ListingForAnalysis = serde_json::from_value(serde_json::json!({
+        "id": 1,
+        "source": "test",
+        "title": "Тест подключения модели",
+        "description": "Синтетическое объявление для проверки подключения. Не реальная квартира."
+    }))?;
+    let listing_analyzer = ListingAnalyzer::new(
+        api_key,
+        config.vision.listing_model,
+        config.vision.api_base_url,
+    );
+    let listing_analysis = listing_analyzer.analyze(&listing, &[image_record]).await?;
+    println!("Listing analysis ({}):", listing_analyzer.model());
+    println!("{}", serde_json::to_string_pretty(&listing_analysis)?);
     Ok(())
 }

@@ -34,6 +34,42 @@ services:
       timeout: 5s
       retries: 5
 
+  # Backend service - runs pre-built binary from host
+  # Build locally first: cd backend && cargo build --release
+  #
+  # Usage examples:
+  #   Run main server:           docker compose --profile backend up backend
+  #   Run with custom binary:    BACKEND_BIN=test_actuality BACKEND_ARGS="--limit 50" docker compose --profile backend up backend
+  backend:
+    image: ubuntu:24.04
+    container_name: realty-backend
+    working_dir: /app
+    command: ["sh", "-c", "apt-get update -qq && apt-get install -qq -y ca-certificates > /dev/null && ./bin/${BACKEND_BIN:-backend} ${BACKEND_ARGS:-}"]
+    environment:
+      - DATABASE_URL=postgres://realty:realty_dev_password@postgres:5432/realty
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=realty
+      - MINIO_SECRET_KEY=realty_dev_password
+      - MINIO_BUCKET=realty-images
+      - RUST_LOG=${RUST_LOG:-backend=debug,tower_http=debug}
+      - MY_AI_PROXY
+      - BACKEND_BIN=${BACKEND_BIN:-backend}
+      - BACKEND_ARGS=${BACKEND_ARGS:-}
+    env_file:
+      - backend/.env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./backend:/app
+      - /home/okhsunrog/tmp_zfs/rust_build/release:/app/bin:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    profiles:
+      - backend
+
 volumes:
   postgres_data:
   minio_data:

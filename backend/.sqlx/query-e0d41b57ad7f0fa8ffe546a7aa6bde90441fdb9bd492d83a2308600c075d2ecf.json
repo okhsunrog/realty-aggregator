@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE images\n            SET status = 'failed', last_error = 'Not found in S3'\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e0d41b57ad7f0fa8ffe546a7aa6bde90441fdb9bd492d83a2308600c075d2ecf"
+}

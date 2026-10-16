@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) AS \"total!\",\n                COUNT(*) FILTER (WHERE status = 'pending') AS \"pending!\",\n                COUNT(*) FILTER (WHERE status = 'downloaded') AS \"downloaded!\",\n                COUNT(*) FILTER (WHERE status = 'not_found') AS \"not_found!\",\n                COUNT(*) FILTER (WHERE status = 'gone') AS \"gone!\",\n                COUNT(*) FILTER (WHERE status = 'failed') AS \"failed!\"\n            FROM images\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "downloaded!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "not_found!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "gone!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "failed!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "5407c46c8436b8fcc5023f1c09fffec92aaf785c7144d919d5d2a7decce0357b"
+}

@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tracing::debug;
 
-use super::client::{OpenRouterClient, OpenRouterError};
+use super::client::{OpenAiClient, OpenAiError};
 use crate::db::{DbImage, ListingAnalysisResult, ListingForAnalysis};
 
 const LISTING_ANALYSIS_PROMPT_TEMPLATE: &str = r#"Проанализируй объявление о продаже квартиры. Ответ только JSON, без markdown.
@@ -38,28 +38,32 @@ const LISTING_ANALYSIS_PROMPT_TEMPLATE: &str = r#"Проанализируй о�
 - move_in_ready = false
 - red_flags должен содержать "Нет фото интерьера"
 
-overall_condition: Состояние ИНТЕРЬЕРА квартиры по фото. НЕ оценивай по фото здания снаружи!
-- 0 = нет фото интерьера или голые стены
-- 20-40 = требует капремонта
-- 40-60 = требует косметического ремонта
-- 60-80 = хорошее состояние
-- 80-100 = отличный/свежий ремонт
+overall_condition: Возьми СРЕДНЕЕ значение condition из анализа фото интерьера как базу. Корректируй только при серьёзных проблемах.
+НЕ занижай оценку за "датированный" но функциональный ремонт - это нормальное состояние.
+- 0 = нет фото интерьера
+- 10-30 = требует капремонта (серьёзные повреждения, аварийное состояние)
+- 30-50 = требует серьёзного ремонта (много проблем, сильный износ)
+- 50-65 = требует косметического ремонта (устаревший но функциональный)
+- 65-80 = хорошее состояние (ухоженная квартира, можно жить)
+- 80-100 = отличное состояние (свежий/качественный ремонт)
 
-is_shell: true если квартира без отделки или нет фото интерьера.
+is_shell: true ТОЛЬКО если голые стены без отделки или нет фото интерьера.
 
-move_in_ready: true ТОЛЬКО если есть фото интерьера И можно заселяться без ремонта.
+move_in_ready: true если квартира в жилом состоянии (можно заселяться без ремонта, даже если ремонт старый).
 
-red_flags: Короткие метки (1-3 слова). Примеры:
+red_flags: ТОЛЬКО серьёзные проблемы на русском языке (1-3 слова):
 - "Нет фото интерьера" (если только exterior)
-- "Плесень", "Трещины", "Потёки воды"
+- "Плесень", "Трещины", "Потёки воды", "Грибок"
+- "Аварийное состояние"
 - "Общежитие", "Коммуналка", "Доля", "Обременение"
+НЕ добавляй "Старый ремонт" или "Требует ремонта" - это не red flag, это просто состояние.
 
-summary: 2-3 предложения. Укажи какие комнаты показаны (или что показаны только внешние фото здания)."#;
+summary: 2-3 предложения. Опиши общее впечатление от квартиры."#;
 
 #[derive(Error, Debug)]
 pub enum ListingAnalyzerError {
-    #[error("OpenRouter API error: {0}")]
-    ApiError(#[from] OpenRouterError),
+    #[error("OpenAI-compatible API API error: {0}")]
+    ApiError(#[from] OpenAiError),
 
     #[error("Failed to parse analysis result: {0}")]
     ParseError(String),
@@ -68,20 +72,20 @@ pub enum ListingAnalyzerError {
     NoImageAnalyses,
 }
 
-/// Listing-level analyzer using gemini-2.5-flash-lite
+/// Listing-level analyzer using the configured model
 pub struct ListingAnalyzer {
-    openrouter: OpenRouterClient,
+    vision_api: OpenAiClient,
 }
 
 impl ListingAnalyzer {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, api_base_url: String) -> Self {
         Self {
-            openrouter: OpenRouterClient::new(api_key, model),
+            vision_api: OpenAiClient::new(api_key, model, api_base_url),
         }
     }
 
     pub fn model(&self) -> &str {
-        self.openrouter.model()
+        self.vision_api.model()
     }
 
     /// Analyze a listing based on its image analyses and listing data
@@ -95,9 +99,9 @@ impl ListingAnalyzer {
         }
 
         let prompt = self.build_prompt(listing, image_analyses);
-        debug!("Sending listing analysis request to OpenRouter");
+        debug!("Sending listing analysis request to OpenAI-compatible API");
 
-        let response = self.openrouter.analyze_text(&prompt).await?;
+        let response = self.vision_api.analyze_text(&prompt).await?;
         self.parse_response(&response)
     }
 

@@ -18,12 +18,20 @@ pub struct ApiConfig {
     #[serde(default = "default_request_delay")]
     pub request_delay_seconds: u32,
 
+    /// Initial load period in days (for empty database)
+    #[serde(default = "default_initial_load_days")]
+    pub initial_load_days: u32,
+
     /// Actuality sync settings
     #[serde(default)]
     pub sync: ApiSyncConfig,
 
     /// API query parameters
     pub query: ApiQueryConfig,
+}
+
+fn default_initial_load_days() -> u32 {
+    30
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +127,14 @@ fn default_image_path_template() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct VisionConfig {
+    /// OpenAI-compatible API base URL, including /v1.
+    #[serde(default = "default_vision_api_base_url")]
+    pub api_base_url: String,
+
+    /// Environment variable containing the API key.
+    #[serde(default = "default_vision_api_key_env")]
+    pub api_key_env: String,
+
     /// Enable automatic analysis after collection
     #[serde(default)]
     pub auto_analyze: bool,
@@ -141,11 +157,19 @@ pub struct VisionConfig {
 }
 
 fn default_image_model() -> String {
-    "google/gemma-3-4b-it".to_string()
+    "gpt-6-luna".to_string()
 }
 
 fn default_listing_model() -> String {
-    "google/gemini-2.5-flash-lite".to_string()
+    "gpt-6-luna".to_string()
+}
+
+fn default_vision_api_base_url() -> String {
+    "https://aiproxy.okhsunrog.ru/v1".to_string()
+}
+
+fn default_vision_api_key_env() -> String {
+    "MY_AI_PROXY".to_string()
 }
 
 fn default_max_retries() -> u32 {

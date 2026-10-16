@@ -51,15 +51,19 @@ area_from = 33
 image_path_template = "{listing_id}/{index}.jpg"
 
 [vision]
+# OpenAI-compatible API. Credentials stay in the named environment variable.
+api_base_url = "https://aiproxy.okhsunrog.ru/v1"
+api_key_env = "MY_AI_PROXY"
+
 # Enable automatic analysis after data collection
 # If false - listings will wait for manual analysis trigger
-auto_analyze = false
+auto_analyze = true
 
 # Model for per-image analysis (first layer)
-image_model = "google/gemma-3-4b-it"
+image_model = "gpt-6-luna"
 
 # Model for listing-level analysis (second layer)
-listing_model = "google/gemini-2.5-flash-lite"
+listing_model = "gpt-6-luna"
 
 # Max attempts before "failed" status
 max_retries = 3

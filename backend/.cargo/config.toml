@@ -1,0 +1,4 @@
+[env]
+# Compile checked queries against the committed schema metadata by default.
+# `cargo sqlx prepare` overrides this when refreshing metadata against PostgreSQL.
+SQLX_OFFLINE = "true"

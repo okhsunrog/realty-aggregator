@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT DISTINCT l.id\n            FROM listings l\n            WHERE l.analyzed_at IS NULL\n              AND l.is_active = true\n              AND (\n                  -- Case 1: Has analyzed images and no pending analysis\n                  (\n                      EXISTS (\n                          SELECT 1 FROM images i\n                          WHERE i.listing_id = l.id\n                            AND i.ai_analyzed_at IS NOT NULL\n                      )\n                      AND NOT EXISTS (\n                          SELECT 1 FROM images i\n                          WHERE i.listing_id = l.id\n                            AND i.status = 'downloaded'\n                            AND i.ai_analyzed_at IS NULL\n                      )\n                  )\n                  OR\n                  -- Case 2: No downloaded images at all (treat as \"no photos\")\n                  NOT EXISTS (\n                      SELECT 1 FROM images i\n                      WHERE i.listing_id = l.id\n                        AND i.status = 'downloaded'\n                  )\n              )\n            LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "35c890933e5494a493286766763fdee9f92f6980f6e871404e4a8b061239bb7f"
+}

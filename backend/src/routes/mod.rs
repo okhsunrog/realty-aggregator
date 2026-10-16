@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
 };
+use futures::{SinkExt, StreamExt};
 use serde_json::json;
 
 use crate::db::{NewCollectionConfig, Repository};
@@ -24,6 +25,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/collect", post(trigger_collection))
         .route("/api/collect/status", get(collection_status))
+        .route("/api/status", get(get_job_status))
+        .route("/api/ws/status", get(ws_status))
         .route("/api/configs", get(list_configs))
         .route("/api/configs", post(create_config))
         .route("/api/configs/{id}", delete(delete_config))
@@ -33,15 +36,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/listings", get(get_listings))
         .route("/api/listings/{id}", get(get_listing))
         .route("/api/listings/{id}/images", get(get_listing_images))
+        .route("/api/listings/{id}/mark-inactive", post(mark_listing_inactive))
         // Analysis endpoints
         .route("/api/analyze/images", post(trigger_image_analysis))
-        .route("/api/analyze/images/all", post(trigger_image_analysis_all))
         .route("/api/analyze/listings", post(trigger_listing_analysis))
         // Single listing analysis endpoints
         .route("/api/listings/{id}/analyze/images", post(analyze_listing_images))
         .route("/api/listings/{id}/analyze", post(analyze_single_listing))
         // Actuality sync
         .route("/api/sync/actuality", post(trigger_actuality_sync))
+        .route("/api/check-actuality", post(check_actuality_by_ids))
         .with_state(state)
 }
 
@@ -82,6 +86,63 @@ async fn trigger_collection(State(state): State<AppState>) -> impl IntoResponse 
 async fn collection_status(State(state): State<AppState>) -> impl IntoResponse {
     let is_running = state.collector.is_running().await;
     Json(json!({"is_running": is_running}))
+}
+
+async fn get_job_status(State(state): State<AppState>) -> impl IntoResponse {
+    let status = state.collector.get_status().await;
+    Json(json!(status))
+}
+
+async fn ws_status(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_status(socket, state))
+}
+
+async fn handle_ws_status(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Subscribe to status updates
+    let mut rx = state.collector.subscribe();
+
+    // Send current status immediately
+    let current_status = state.collector.get_status().await;
+    if let Ok(json) = serde_json::to_string(&current_status) {
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            return;
+        }
+    }
+
+    // Spawn task to handle incoming messages (for ping/pong and close)
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    });
+
+    // Send status updates from broadcast channel
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(status) = rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&status) {
+                if sender.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = &mut recv_task => {
+            send_task.abort();
+        }
+        _ = &mut send_task => {
+            recv_task.abort();
+        }
+    }
 }
 
 async fn list_configs(State(state): State<AppState>) -> impl IntoResponse {
@@ -172,40 +233,6 @@ async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct AnalyzeBatchParams {
-    #[serde(default = "default_batch_limit")]
-    limit: i64,
-}
-
-fn default_batch_limit() -> i64 {
-    50
-}
-
-async fn trigger_image_analysis(
-    State(state): State<AppState>,
-    Json(params): Json<Option<AnalyzeBatchParams>>,
-) -> impl IntoResponse {
-    let limit = params.map(|p| p.limit).unwrap_or(50);
-
-    let collector = state.collector.clone();
-    tokio::spawn(async move {
-        match collector.run_image_analysis_batch(limit).await {
-            Ok(count) => {
-                tracing::info!("Image analysis batch completed: {} images analyzed", count);
-            }
-            Err(e) => {
-                tracing::error!("Image analysis batch failed: {}", e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Image analysis batch started", "limit": limit})),
-    )
-}
-
-#[derive(serde::Deserialize)]
 struct AnalyzeAllParams {
     #[serde(default = "default_concurrency")]
     concurrency: usize,
@@ -215,7 +242,7 @@ fn default_concurrency() -> usize {
     10
 }
 
-async fn trigger_image_analysis_all(
+async fn trigger_image_analysis(
     State(state): State<AppState>,
     Json(params): Json<Option<AnalyzeAllParams>>,
 ) -> impl IntoResponse {
@@ -225,44 +252,44 @@ async fn trigger_image_analysis_all(
     tokio::spawn(async move {
         match collector.run_image_analysis_all(concurrency).await {
             Ok(count) => {
-                tracing::info!("Full image analysis completed: {} images analyzed", count);
+                tracing::info!("Image analysis completed: {} images analyzed", count);
             }
             Err(e) => {
-                tracing::error!("Full image analysis failed: {}", e);
+                tracing::error!("Image analysis failed: {}", e);
             }
         }
     });
 
     (
         StatusCode::ACCEPTED,
-        Json(json!({"message": "Full image analysis started", "concurrency": concurrency})),
+        Json(json!({"message": "Image analysis started", "concurrency": concurrency})),
     )
 }
 
 async fn trigger_listing_analysis(
     State(state): State<AppState>,
-    Json(params): Json<Option<AnalyzeBatchParams>>,
+    Json(params): Json<Option<AnalyzeAllParams>>,
 ) -> impl IntoResponse {
-    let limit = params.map(|p| p.limit).unwrap_or(20);
+    let concurrency = params.map(|p| p.concurrency).unwrap_or(10);
 
     let collector = state.collector.clone();
     tokio::spawn(async move {
-        match collector.run_listing_analysis_batch(limit).await {
+        match collector.run_listing_analysis_all(concurrency).await {
             Ok(count) => {
                 tracing::info!(
-                    "Listing analysis batch completed: {} listings analyzed",
+                    "Listing analysis completed: {} listings analyzed",
                     count
                 );
             }
             Err(e) => {
-                tracing::error!("Listing analysis batch failed: {}", e);
+                tracing::error!("Listing analysis failed: {}", e);
             }
         }
     });
 
     (
         StatusCode::ACCEPTED,
-        Json(json!({"message": "Listing analysis batch started", "limit": limit})),
+        Json(json!({"message": "Listing analysis started", "concurrency": concurrency})),
     )
 }
 
@@ -276,6 +303,11 @@ struct ListingsQuery {
     analyzed_only: Option<bool>,
     hide_shell: Option<bool>,
     active_only: Option<bool>,
+    // New filters
+    property_type: Option<String>,  // "Новостройка", "Вторичка", or empty for all
+    is_shell: Option<bool>,         // true/false, or None for all
+    min_condition: Option<i32>,
+    max_condition: Option<i32>,
 }
 
 async fn get_listings(
@@ -297,6 +329,10 @@ async fn get_listings(
             params.analyzed_only.unwrap_or(false),
             params.hide_shell.unwrap_or(false),
             params.active_only.unwrap_or(true),
+            params.property_type,
+            params.is_shell,
+            params.min_condition,
+            params.max_condition,
         )
         .await
     {
@@ -368,13 +404,22 @@ async fn analyze_listing_images(
     )
 }
 
+#[derive(serde::Deserialize)]
+struct AnalyzeListingParams {
+    model: Option<String>,
+}
+
 async fn analyze_single_listing(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Json(params): Json<Option<AnalyzeListingParams>>,
 ) -> impl IntoResponse {
     let collector = state.collector.clone();
+    let model = params.and_then(|p| p.model);
+    let model_for_response = model.clone();
+
     tokio::spawn(async move {
-        match collector.analyze_single_listing(id).await {
+        match collector.analyze_single_listing_with_model(id, model).await {
             Ok(_) => {
                 tracing::info!("Analyzed listing {}", id);
             }
@@ -386,7 +431,11 @@ async fn analyze_single_listing(
 
     (
         StatusCode::ACCEPTED,
-        Json(json!({"message": "Listing analysis started", "listing_id": id})),
+        Json(json!({
+            "message": "Listing analysis started",
+            "listing_id": id,
+            "model": model_for_response
+        })),
     )
 }
 
@@ -421,4 +470,49 @@ async fn trigger_actuality_sync(
         StatusCode::ACCEPTED,
         Json(json!({"message": "Actuality sync started", "hours": hours})),
     )
+}
+
+#[derive(serde::Deserialize)]
+struct CheckActualityParams {
+    ids: Vec<i64>,
+}
+
+async fn check_actuality_by_ids(
+    State(state): State<AppState>,
+    Json(params): Json<CheckActualityParams>,
+) -> impl IntoResponse {
+    match state.collector.check_actuality_by_ids(&params.ids).await {
+        Ok(results) => (
+            StatusCode::OK,
+            Json(json!({
+                "requested": params.ids.len(),
+                "found": results.len(),
+                "results": results
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e})),
+        ),
+    }
+}
+
+async fn mark_listing_inactive(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.repository.mark_listing_inactive(id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(json!({"success": true, "id": id, "is_active": false})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Listing not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        ),
+    }
 }

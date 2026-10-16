@@ -1,0 +1,143 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", s3_key, http_status,\n                   download_attempts, last_error, downloaded_at, ai_image_type, ai_room,\n                   ai_condition, ai_confidence, ai_issues, ai_description, ai_model,\n                   ai_analyzed_at, created_at\n            FROM images\n            WHERE listing_id = $1\n            ORDER BY image_index\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "listing_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_index",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "source_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "status: ImageStatus",
+        "type_info": {
+          "Custom": {
+            "name": "image_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "downloaded",
+                "not_found",
+                "gone",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "s3_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "http_status",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "download_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "downloaded_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "ai_image_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "ai_room",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "ai_condition",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "ai_confidence",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "ai_issues",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 15,
+        "name": "ai_description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "ai_model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "ai_analyzed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "5f84a70e62f7c5cc1a47af053f12b5bc0c4afa0047b4edb141790d9f940d4dcd"
+}

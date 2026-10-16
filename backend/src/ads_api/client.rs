@@ -186,4 +186,24 @@ impl AdsApiClient {
 
         self.get_check_feed(query).await
     }
+
+    /// Проверить актуальность по конкретным ID (макс ~500 за раз)
+    pub async fn check_actuality_by_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<Vec<super::models::CheckFeedItem>, AdsApiError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let ids_str = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+
+        let query = super::models::CheckFeedQuery {
+            id: Some(ids_str),
+            limit: Some(1000),
+            ..Default::default()
+        };
+
+        self.get_check_feed(query).await
+    }
 }

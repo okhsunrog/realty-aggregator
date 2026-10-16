@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE ai_analyzed_at IS NOT NULL) AS \"analyzed!\",\n                COUNT(*) FILTER (WHERE status = 'downloaded' AND ai_analyzed_at IS NULL) AS \"pending!\"\n            FROM images\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "analyzed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "d99374b37b8ff8e6f1eb51d4022ec1143cfc8d2d915cc55c187b9303d46b11cb"
+}

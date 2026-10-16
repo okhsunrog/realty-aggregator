@@ -252,7 +252,7 @@ pub struct CollectionState {
     pub last_collection_at: Option<DateTime<Utc>>,
 }
 
-/// Per-image AI analysis result (from gemma-3-4b-it)
+/// Per-image analysis result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageAnalysisResult {
     pub image_type: String,
@@ -263,7 +263,7 @@ pub struct ImageAnalysisResult {
     pub description: String,
 }
 
-/// Listing-level AI analysis result (from gemini-2.5-flash-lite)
+/// Listing-level analysis result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListingAnalysisResult {
     pub overall_condition: i32,
@@ -271,4 +271,12 @@ pub struct ListingAnalysisResult {
     pub move_in_ready: bool,
     pub red_flags: Vec<String>,
     pub summary: String,
+}
+
+/// Minimal listing info for actuality checks
+#[derive(Debug, FromRow, Serialize)]
+pub struct OldListingInfo {
+    pub id: i64,
+    pub price: Option<i64>,
+    pub created_at: Option<DateTime<Utc>>,
 }

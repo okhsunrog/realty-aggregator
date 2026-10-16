@@ -261,6 +261,31 @@ impl Collector {
         )
         .await
     }
+    /// Scheduled work waits for the current job instead of losing an entire interval.
+    pub async fn run_scheduled(&self, job: Job) -> Result<(), String> {
+        if !matches!(
+            &job,
+            Job::Collect | Job::Sync { .. } | Job::CheckSources { .. }
+        ) {
+            return Err("Unsupported scheduled job".to_owned());
+        }
+        let permit = loop {
+            if let Ok(permit) = self.reserve() {
+                break permit;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        };
+        let phase = job.phase();
+        self.perform(permit, phase, async {
+            match job {
+                Job::Collect => self.do_collection().await.map(|_| ()),
+                Job::Sync { hours } => self.do_sync(hours).await.map(|_| ()),
+                Job::CheckSources { ids } => self.do_source_checks(&ids).await.map(|_| ()),
+                _ => unreachable!("scheduled job checked before reserving"),
+            }
+        })
+        .await
+    }
     pub async fn sync_actuality(&self, hours: u32) -> Result<SyncResult, String> {
         self.perform(
             self.reserve()?,
@@ -324,6 +349,14 @@ impl Collector {
             .get_images_for_listing(id)
             .await
             .map_err(|e| e.to_string())?;
+        let selected = images
+            .iter()
+            .filter(|image| image.image_index < self.photo_limit())
+            .count();
+        if selected == 0 {
+            return Err("У объявления нет фотографий".to_owned());
+        }
+        let mut failures = 0;
         for image in images
             .into_iter()
             .filter(|image| image.image_index < self.photo_limit())
@@ -332,11 +365,15 @@ impl Collector {
                 continue;
             }
             if image.download_attempts >= 3 || image.status == ImageStatus::Gone {
+                failures += 1;
                 continue;
             }
             let download = storage
                 .download_and_store_single(id, image.image_index, &image.source_url)
                 .await;
+            if !download.success {
+                failures += 1;
+            }
             let status = if download.success {
                 ImageStatus::Downloaded
             } else {
@@ -357,6 +394,11 @@ impl Collector {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+        }
+        if failures > 0 {
+            return Err(format!(
+                "Не удалось загрузить {failures} фотографий. Подробности доступны в данных изображений."
+            ));
         }
         Ok(())
     }

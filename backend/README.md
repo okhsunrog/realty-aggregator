@@ -127,7 +127,8 @@ Only one background task runs at a time within the server process. Repeated
 starts return 409, invalid concurrency (outside 1–16) or models outside
 `vision.allowed_models` return 400. Failed tasks publish `last_error` in status.
 Run one backend instance against the database. Collection and actuality sync use
-the configured intervals; scheduled tasks skip ticks missed during long work.
+the configured intervals. Scheduled tasks wait for the current job to finish;
+they skip extra ticks missed during long work instead of building a backlog.
 
 ## Source availability checks and direct access
 

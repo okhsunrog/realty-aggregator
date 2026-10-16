@@ -10,7 +10,7 @@ use backend::{
     ads_api::AdsApiClient,
     config::Config,
     db::Repository,
-    jobs::Collector,
+    jobs::{Collector, Job},
     routes::{AppState, create_router},
     storage::StorageClient,
     vision::{ImageAnalyzer, ListingAnalyzer},
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(error) = scheduled_collector.run_collection().await {
+            if let Err(error) = scheduled_collector.run_scheduled(Job::Collect).await {
                 tracing::warn!(%error, "Scheduled collection failed");
             }
         }
@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Err(error) = scheduled_collector.sync_actuality(hours).await {
+                if let Err(error) = scheduled_collector.run_scheduled(Job::Sync { hours }).await {
                     tracing::warn!(%error, "Scheduled actuality sync failed");
                 }
             }
@@ -171,7 +171,10 @@ async fn main() -> anyhow::Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Err(error) = source_collector.run_source_checks(&[]).await {
+                if let Err(error) = source_collector
+                    .run_scheduled(Job::CheckSources { ids: Vec::new() })
+                    .await
+                {
                     tracing::warn!(%error, "Source checks failed");
                 }
             }

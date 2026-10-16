@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO listing_reparse_requests(listing_id,requested_at,queued) VALUES ($1,NOW(),$2) ON CONFLICT(listing_id) DO UPDATE SET requested_at = NOW(), queued = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "26df17e310eae5606f55547c220c75a21bb0faf2b35ac07584aac93a22fb7e94"
+}

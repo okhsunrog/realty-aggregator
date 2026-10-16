@@ -14,7 +14,7 @@ request_delay_seconds = 6
 enabled = true
 
 # Actuality check interval (hours)
-interval_hours = 24
+interval_hours = 6
 
 [api.query]
 # API query parameters
@@ -93,6 +93,21 @@ max_photos = 8
 [actuality]
 enabled = true
 interval_minutes = 60
-batch_size = 20
 recheck_hours = 24
 request_delay_seconds = 10
+
+[[actuality.sources]]
+source = "realty.yandex.ru"
+batch_size = 40
+
+[[actuality.sources]]
+source = "youla.io"
+batch_size = 11
+
+[[actuality.sources]]
+source = "cian.ru"
+batch_size = 2
+
+[[actuality.sources]]
+source = "avito.ru"
+batch_size = 2

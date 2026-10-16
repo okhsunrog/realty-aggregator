@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET feed_history_synced_at = $2 WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a420c16bd68313e68418d1baa3989bec7c530a2b1a6a852e20056a06fa1be8db"
+}

@@ -65,6 +65,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sync/actuality", post(trigger_actuality_sync))
         .route("/api/check-actuality", post(check_actuality_by_ids))
         .route("/api/check-sources", post(check_sources))
+        .route("/api/listings/{id}/request-reparse", post(request_reparse))
         .route("/api/listings/{id}/check-source", post(check_single_source));
     let app = if let Some(directory) = state
         .config
@@ -90,6 +91,25 @@ async fn root() -> &'static str {
 
 async fn health() -> &'static str {
     "OK"
+}
+
+async fn request_reparse(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    match state.collector.request_reparse(id).await {
+        Ok(queued) => (
+            StatusCode::OK,
+            Json(json!({"queued": queued, "message": if queued {
+            "Запрос на повторный сбор принят. Срок обработки не гарантирован; это не подтверждение актуальности."
+        } else { "Провайдер уже собирал объявление за последние 31 день. Новый запрос в очередь не добавлен." }})),
+        ),
+        Err(error) => (
+            if error == "Job already in progress" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            Json(json!({"error": error})),
+        ),
+    }
 }
 
 async fn trigger_collection(State(state): State<AppState>) -> impl IntoResponse {
@@ -227,17 +247,25 @@ async fn toggle_config(State(state): State<AppState>, Path(id): Path<i32>) -> im
 }
 
 async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::hours(state.config.actuality.recheck_hours as i64);
     match tokio::try_join!(
         state.repository.get_listings_count(),
         state.repository.get_active_listings_count(),
         state.repository.get_images_stats(),
         state.repository.get_analysis_stats(),
-        state.repository.get_all_configs()
+        state.repository.get_all_configs(),
+        state.repository.get_availability_stats(cutoff),
+        state.repository.get_collection_state()
     ) {
-        Ok((total, active, images, analysis, configs)) => (
+        Ok((total, active, images, analysis, configs, availability, collection)) => (
             StatusCode::OK,
             Json(json!({
                 "total_listings": total, "active_listings": active, "images": images, "analysis": analysis,
+                "confirmed_listings": availability.iter().map(|s| s.confirmed).sum::<i64>(),
+                "removed_listings": availability.iter().map(|s| s.removed).sum::<i64>(),
+                "unconfirmed_listings": total - availability.iter().map(|s| s.confirmed + s.removed).sum::<i64>(),
+                "availability": availability, "actuality_synced_at": collection.last_sync_at,
                 "configs_count": configs.len(), "active_configs_count": configs.iter().filter(|c| c.is_active.unwrap_or(false)).count()
             })),
         ),
@@ -346,7 +374,7 @@ async fn get_listings(
         Ok((listings, total)) => (
             StatusCode::OK,
             Json(json!({
-                "listings": listings,
+                "listings": listings.iter().map(|l| listing_response(l, &state.config)).collect::<Vec<_>>(),
                 "total": total,
                 "page": page,
                 "per_page": per_page
@@ -361,7 +389,10 @@ async fn get_listings(
 
 async fn get_listing(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
     match state.repository.get_listing_by_id(id).await {
-        Ok(Some(listing)) => (StatusCode::OK, Json(json!(listing))),
+        Ok(Some(listing)) => (
+            StatusCode::OK,
+            Json(listing_response(&listing, &state.config)),
+        ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "Listing not found"})),
@@ -371,6 +402,43 @@ async fn get_listing(State(state): State<AppState>, Path(id): Path<i64>) -> impl
             Json(json!({"error": e.to_string()})),
         ),
     }
+}
+
+fn listing_response(
+    listing: &crate::db::DbListing,
+    config: &crate::config::Config,
+) -> serde_json::Value {
+    let now = chrono::Utc::now();
+    let expires = listing
+        .actuality_checked_at
+        .map(|time| time + chrono::Duration::hours(config.actuality.recheck_hours as i64));
+    let confirmed = listing.is_active == Some(true)
+        && matches!(
+            listing.actuality_origin.as_str(),
+            "source_page" | "check_feed" | "manual"
+        )
+        && expires.is_some_and(|v| v >= now)
+        && listing.source_time.is_none_or(|source| {
+            listing
+                .actuality_checked_at
+                .is_some_and(|check| check >= source)
+        });
+    let status = if listing.is_active == Some(false) {
+        "removed"
+    } else if confirmed {
+        "confirmed"
+    } else if listing
+        .source_time
+        .is_some_and(|v| v >= now - chrono::Duration::days(7))
+    {
+        "recently_seen"
+    } else {
+        "unconfirmed"
+    };
+    let mut value = json!(listing);
+    value["availability_state"] = json!(status);
+    value["confirmation_expires_at"] = json!(expires);
+    value
 }
 
 async fn get_listing_images(

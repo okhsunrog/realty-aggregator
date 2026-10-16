@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM listings WHERE source = $3 AND\n            (is_active = true OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))\n            AND (source_checked_at IS NULL OR source_checked_at < NOW() - INTERVAL '1 hour' * $2::int\n                OR source_time > source_checked_at)\n            ORDER BY EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite) DESC,\n                source_checked_at NULLS FIRST, source_time DESC NULLS LAST, id DESC LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c1bf51ca2be8faf9b0983b701524d2bd7e5c585ab35b6d43daae30b74ad4f037"
+}

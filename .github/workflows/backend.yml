@@ -50,4 +50,4 @@ jobs:
           SQLX_OFFLINE: 'false'
         run: cargo sqlx prepare --check -- --all-targets --locked
       - name: Run unit and repository tests
-        run: cargo test --lib --test repository --locked
+        run: cargo test --lib --test repository --test availability --locked

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO source_check_hosts (source, failures, retry_after, last_error, checked_at)\n            VALUES ($1, CASE WHEN $3 > 0 THEN 1 ELSE 0 END,\n                CASE WHEN $3 > 0 THEN $2::timestamptz + $3 * INTERVAL '1 second' ELSE NULL END,\n                CASE WHEN $3 > 0 THEN $4::text ELSE NULL END, $2)\n            ON CONFLICT (source) DO UPDATE SET\n                failures = CASE WHEN $3 > 0 THEN LEAST(source_check_hosts.failures + 1, 10) ELSE 0 END,\n                retry_after = CASE WHEN $3 > 0 THEN $2::timestamptz + LEAST(86400, $3 * power(2, LEAST(source_check_hosts.failures, 5))) * INTERVAL '1 second' ELSE NULL END,\n                last_error = CASE WHEN $3 > 0 THEN $4 ELSE NULL END, checked_at = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3b18139f63b02e5d5107b3d5e4b321c3c90b7718a676eed6804318e9f1242da"
+}

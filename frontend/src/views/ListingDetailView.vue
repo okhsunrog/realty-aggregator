@@ -26,13 +26,21 @@ import {
   NSwitch,
   useMessage,
 } from 'naive-ui'
-import { fetchSettings, sourceOriginLabel, imageTypeLabel, roomLabel, sourceStatusLabel, startSourceCheck, fetchReview, saveReview, fetchPriceHistory, startAnalysis, getJobStatus, type ListingReview, type PriceObservation, fetchListing, fetchListingImages, getImageUrl, markListingInactive, type Listing, type ListingImage } from '@/api'
+import { fetchSettings, requestReparse, feedStatusLabel, hasFreshConfirmation, sourceOriginLabel, imageTypeLabel, roomLabel, sourceStatusLabel, startSourceCheck, fetchReview, saveReview, fetchPriceHistory, startAnalysis, getJobStatus, type ListingReview, type PriceObservation, fetchListing, fetchListingImages, getImageUrl, markListingInactive, type Listing, type ListingImage } from '@/api'
 
 const message = useMessage()
 const error = ref<string | null>(null)
 const review = ref<ListingReview>({ favorite: false, hidden: false, stage: 'new', notes: '' })
 const priceHistory = ref<PriceObservation[]>([])
 const savingReview = ref(false)
+const requestingReparse = ref(false)
+async function reparseOriginal() {
+  if (!listing.value) return
+  requestingReparse.value = true
+  try { message.info((await requestReparse(listing.value.id)).message, { duration: 12000 }) }
+  catch (e) { message.error(e instanceof Error ? e.message : 'Не удалось отправить запрос') }
+  finally { requestingReparse.value = false }
+}
 const certificate = ref<number | null>(Number(localStorage.getItem('certificateEstimate')) || 0)
 watch(certificate, value => localStorage.setItem('certificateEstimate', String(value ?? '')))
 const stageOptions = [
@@ -280,12 +288,19 @@ onUnmounted(() => { disposed = true; requestVersion++; analysisController?.abort
       </n-card>
       <n-card title="Актуальность объявления">
         <n-space vertical>
-          <n-tag :type="!listing.is_active ? 'error' : listing.source_check_status === 'active' ? 'success' : 'warning'">{{ sourceStatusLabel(listing) }}</n-tag>
+          <n-tag :type="listing.availability_state === 'removed' ? 'error' : hasFreshConfirmation(listing) ? 'success' : 'warning'">{{ sourceStatusLabel(listing) }}</n-tag>
+          <div v-if="listing.source_time">Последнее появление в сборе: {{ new Date(listing.source_time).toLocaleString('ru-RU') }}</div>
+          <div v-if="listing.feed_observed_at">ADS API: {{ feedStatusLabel(listing.feed_is_actual) }}. Получено {{ new Date(listing.feed_observed_at).toLocaleString('ru-RU') }}</div>
+          <div v-if="listing.source_confirmed_at">Исходная карточка: {{ listing.source_confirmed_status === 'active' ? 'была опубликована' : 'была недоступна' }} {{ new Date(listing.source_confirmed_at).toLocaleString('ru-RU') }}</div>
           <div v-if="listing.source_checked_at">Последняя попытка: {{ new Date(listing.source_checked_at).toLocaleString('ru-RU') }}</div>
           <div v-if="listing.source_check_reason">{{ listing.source_check_reason }}<span v-if="listing.source_check_http_status"> (HTTP {{ listing.source_check_http_status }})</span></div>
           <div v-if="listing.actuality_checked_at">Последняя определённая отметка: {{ new Date(listing.actuality_checked_at).toLocaleString('ru-RU') }} · {{ sourceOriginLabel(listing.actuality_origin) }}</div>
           <n-alert type="info">Автоматическая проверка может встретить капчу или ограничение доступа. Неопределённый результат не подтверждает снятие квартиры с продажи.</n-alert>
           <n-button :loading="checkingSource" :disabled="refreshingImages || refreshingListing" @click="refreshAnalysis(false, true)">Проверить исходную карточку</n-button>
+          <template v-if="['avito.ru', 'cian.ru', 'realty.yandex.ru'].includes(listing.source)">
+            <n-button :loading="requestingReparse" :disabled="checkingSource || refreshingImages || refreshingListing" @click="reparseOriginal">Запросить повторный сбор через ADS API</n-button>
+            <div style="font-size: 0.85em; color: #888">Для объявлений, которые провайдер не собирал последние 31 день. Результат появится после обработки очереди и следующего сбора.</div>
+          </template>
         </n-space>
       </n-card>
       <!-- AI Analysis -->

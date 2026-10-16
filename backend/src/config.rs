@@ -50,18 +50,34 @@ impl Default for ServerConfig {
 pub struct ActualityConfig {
     pub enabled: bool,
     pub interval_minutes: u32,
-    pub batch_size: u32,
     pub recheck_hours: i32,
     pub request_delay_seconds: u64,
+    pub sources: Vec<SourcePolicy>,
+}
+#[derive(Debug, Deserialize)]
+pub struct SourcePolicy {
+    pub source: String,
+    pub batch_size: u32,
 }
 impl Default for ActualityConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             interval_minutes: 60,
-            batch_size: 20,
             recheck_hours: 24,
             request_delay_seconds: 10,
+            sources: [
+                ("realty.yandex.ru", 40),
+                ("youla.io", 11),
+                ("cian.ru", 2),
+                ("avito.ru", 2),
+            ]
+            .into_iter()
+            .map(|(source, batch_size)| SourcePolicy {
+                source: source.into(),
+                batch_size,
+            })
+            .collect(),
         }
     }
 }
@@ -318,9 +334,29 @@ impl Config {
         let config: Self =
             toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
         if config.actuality.interval_minutes == 0
-            || !(1..=100).contains(&config.actuality.batch_size)
             || !(1..=720).contains(&config.actuality.recheck_hours)
             || config.actuality.request_delay_seconds < 5
+            || config.actuality.sources.is_empty()
+            || config.actuality.sources.iter().any(|s| {
+                !(1..=100).contains(&s.batch_size)
+                    || ![
+                        "realty.yandex.ru",
+                        "youla.io",
+                        "cian.ru",
+                        "avito.ru",
+                        "sob.ru",
+                        "domclick.ru",
+                    ]
+                    .contains(&s.source.as_str())
+            })
+            || config
+                .actuality
+                .sources
+                .iter()
+                .map(|s| &s.source)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != config.actuality.sources.len()
             || !(1..=1000).contains(&config.api.max_downloads_per_run)
             || config.api.collect_interval_minutes == 0
             || config.api.sync.interval_hours == 0

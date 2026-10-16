@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\" FROM listings\n            WHERE ($1::bigint IS NULL OR price >= $1)\n              AND ($2::bigint IS NULL OR price <= $2)\n              AND ($3::int IS NULL OR rooms = $3)\n              AND ($4 = false OR analyzed_at IS NOT NULL)\n              AND ($5 = false OR analysis_is_shell IS NOT TRUE)\n              AND ($6 = false OR is_active = true)\n              AND ($7::text IS NULL OR params->>'Вид объекта' = $7)\n              AND ($8::bool IS NULL OR analysis_is_shell = $8)\n              AND ($9::int IS NULL OR analysis_condition >= $9)\n              AND ($10::int IS NULL OR analysis_condition <= $10)\n              AND ($11::float8 IS NULL OR area >= $11)\n              AND ($12::bool IS NULL OR analysis_move_in_ready = $12)\n              AND ($13 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))\n              AND ($14 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))\n\n              AND ($15::timestamptz IS NULL OR (is_active = true AND actuality_checked_at >= $15 AND actuality_origin IN ('source_page', 'check_feed', 'manual') AND (source_time IS NULL OR actuality_checked_at >= source_time)))\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool",
+        "Int4",
+        "Int4",
+        "Float8",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ccff57884312d215daea10e4b8cf2741152594d985a3d017aadc41acb2121ac1"
+}

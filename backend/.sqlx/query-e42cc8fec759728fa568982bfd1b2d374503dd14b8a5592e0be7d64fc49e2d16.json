@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT NOT EXISTS (SELECT 1 FROM source_check_hosts\n            WHERE source = $1 AND retry_after > NOW()) AS \"ready!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ready!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e42cc8fec759728fa568982bfd1b2d374503dd14b8a5592e0be7d64fc49e2d16"
+}

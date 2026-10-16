@@ -62,6 +62,14 @@ pub struct DbListing {
     pub time_updated: Option<DateTime<Utc>>,
     pub fetched_at: DateTime<Utc>,
     pub source_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub feed_is_actual: Option<i32>,
+    #[serde(default)]
+    pub feed_observed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub source_confirmed_status: Option<String>,
+    #[serde(default)]
+    pub source_confirmed_at: Option<DateTime<Utc>>,
     pub analysis_attempts: i32,
     pub analysis_last_error: Option<String>,
     pub actuality_checked_at: Option<DateTime<Utc>>,
@@ -187,6 +195,10 @@ impl DbListing {
                 .or(time_updated)
                 .or(time_created),
             analysis_attempts: 0,
+            feed_is_actual: listing.is_actual,
+            feed_observed_at: Some(Utc::now()),
+            source_confirmed_status: None,
+            source_confirmed_at: None,
             analysis_last_error: None,
             actuality_checked_at: None,
             actuality_origin: "source_feed".to_owned(),

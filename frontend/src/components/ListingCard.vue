@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { NCard, NTag, NSpace, NProgress, NEllipsis } from 'naive-ui'
 import type { Listing } from '@/api'
-import { sourceStatusLabel, getImageUrl } from '@/api'
+import { sourceStatusLabel, hasFreshConfirmation, getImageUrl } from '@/api'
 import { computed } from 'vue'
 
 const props = defineProps<{
@@ -66,10 +66,11 @@ const imageUrl = computed(() => {
     </template>
 
     <n-space vertical size="small">
-      <n-tag size="small" :type="!listing.is_active ? 'error' : listing.source_check_status === 'active' ? 'success' : 'warning'">
+      <n-tag size="small" :type="listing.availability_state === 'removed' ? 'error' : hasFreshConfirmation(listing) ? 'success' : 'warning'">
         {{ sourceStatusLabel(listing) }}
       </n-tag>
-      <div v-if="listing.source_checked_at" style="font-size: 0.8em; color: #888">Проверка: {{ new Date(listing.source_checked_at).toLocaleString('ru-RU') }}</div>
+      <div v-if="listing.actuality_checked_at" style="font-size: 0.8em; color: #888">Сведения от {{ new Date(listing.actuality_checked_at).toLocaleString('ru-RU') }}</div>
+      <div v-else-if="listing.source_time" style="font-size: 0.8em; color: #888">Встречалось {{ new Date(listing.source_time).toLocaleString('ru-RU') }}</div>
       <div class="info-row">
         <span v-if="listing.rooms">{{ listing.rooms }} комн.</span>
         <span v-if="listing.area">{{ listing.area }} м²</span>

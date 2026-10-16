@@ -96,6 +96,58 @@ impl AdsApiClient {
         }
     }
 
+    pub async fn get_latest_source_listing(
+        &self,
+        source: i32,
+        id: &str,
+    ) -> Result<Option<Listing>, AdsApiError> {
+        let mut rows = self
+            .get_listings(ListingsQuery {
+                source: Some(source.to_string()),
+                avitoid: Some(id.to_owned()),
+                withphone: Some(0),
+                sort: Some("desc".into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await?;
+        Ok(rows.pop())
+    }
+
+    /// Queue an old original URL for the provider's parser. Acceptance is not an activity check.
+    pub async fn request_reparse(&self, link: &str) -> Result<bool, AdsApiError> {
+        self.wait_for_rate_limit().await;
+        let response = self
+            .client
+            .get(format!("{}/api-add-link-to-parse-queue", self.base_url))
+            .query(&[
+                ("user", self.user.as_str()),
+                ("token", self.token.as_str()),
+                ("url", link),
+            ])
+            .send()
+            .await
+            .map_err(|e| AdsApiError::HttpError(e.without_url()))?
+            .error_for_status()
+            .map_err(|e| AdsApiError::HttpError(e.without_url()))?;
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AdsApiError::HttpError(e.without_url()))?;
+        let code = value.get("code").and_then(|v| v.as_i64()).unwrap_or(500) as i32;
+        if code != 200 {
+            return Err(AdsApiError::ApiError {
+                code,
+                message: "Provider rejected parse request".into(),
+            });
+        }
+        let added = value
+            .get("added")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| AdsApiError::MissingParameter("Missing parse queue result".into()))?;
+        Ok(!added.is_empty())
+    }
+
     pub async fn get_one(&self, id: i64) -> Result<Option<Listing>, AdsApiError> {
         self.wait_for_rate_limit().await;
 

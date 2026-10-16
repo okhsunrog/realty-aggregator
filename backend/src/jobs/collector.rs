@@ -303,17 +303,29 @@ impl Collector {
         .await
     }
     async fn do_source_checks(&self, requested: &[i64]) -> Result<usize, String> {
-        let ids = if requested.is_empty() {
-            self.repository
-                .get_source_check_queue(
-                    self.config.actuality.batch_size as i64,
-                    self.config.actuality.recheck_hours,
-                )
-                .await
-                .map_err(|e| e.to_string())?
-        } else {
-            requested.to_vec()
-        };
+        let mut ids = requested.to_vec();
+        if ids.is_empty() {
+            for policy in &self.config.actuality.sources {
+                if self
+                    .repository
+                    .source_ready(&policy.source)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    ids.extend(
+                        self.repository
+                            .get_source_check_queue(
+                                &policy.source,
+                                policy.batch_size as i64,
+                                self.config.actuality.recheck_hours,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+        }
+        let mut checked = 0;
         for (index, id) in ids.iter().enumerate() {
             let listing = self
                 .repository
@@ -321,15 +333,33 @@ impl Collector {
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or("Listing not found")?;
+            // Re-check after each request: one block pauses the rest of this source's batch.
+            if !self
+                .repository
+                .source_ready(&listing.source)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                self.progress(index + 1, ids.len()).await;
+                continue;
+            }
             let check = self.source_checker.check(&listing.url).await;
             self.repository
                 .save_source_check(*id, &check)
                 .await
                 .map_err(|e| e.to_string())?;
+            self.repository
+                .record_source_attempt(&listing.source, &check)
+                .await
+                .map_err(|e| e.to_string())?;
             tracing::info!(listing_id = id, status = check.status.as_str(), http = ?check.http_status, reason = %check.reason, "Source check completed");
+            checked += 1;
             self.progress(index + 1, ids.len()).await;
         }
-        Ok(ids.len())
+        if checked == 0 && !requested.is_empty() {
+            return Err("Источник временно приостановлен после ограничения доступа. Срок следующей попытки указан в статистике.".into());
+        }
+        Ok(checked)
     }
     pub async fn run_listing_pipeline(&self, id: i64) -> Result<(), String> {
         self.perform(self.reserve()?, JobPhase::DownloadingImages, async {
@@ -797,41 +827,124 @@ impl Collector {
             .last_sync_at
             .unwrap_or(through - Duration::hours(hours as i64))
             - Duration::hours(1);
-        let ids = self
+        // Capture both groups before marking chunks complete. New records always receive their history.
+        let pending = self
             .repository
-            .get_listing_ids()
+            .feed_sync_ids(true)
+            .await
+            .map_err(|e| e.to_string())?;
+        let existing = self
+            .repository
+            .feed_sync_ids(false)
             .await
             .map_err(|e| e.to_string())?;
         let mut result = SyncResult::default();
-        for chunk in ids.chunks(250) {
-            let checks = self
-                .api_client
-                .get_check_feed_between(since, through, chunk)
-                .await
-                .map_err(|e| e.to_string())?;
-            for item in checks {
-                let Some(time) = item.time.as_deref().and_then(parse_moscow) else {
-                    return Err("Invalid actuality timestamp; checkpoint unchanged".to_owned());
-                };
-                if self
-                    .repository
-                    .apply_actuality(item.id, item.is_actual != 0, time)
+        let total = pending.len() + existing.len();
+        let mut processed = 0;
+        for (ids, from) in [(&pending, chrono::DateTime::UNIX_EPOCH), (&existing, since)] {
+            for chunk in ids.chunks(250) {
+                let checks = self
+                    .api_client
+                    .get_check_feed_between(from, through, chunk)
                     .await
-                    .map_err(|e| e.to_string())?
-                {
-                    result.total_checked += 1;
-                    if item.is_actual == 0 {
-                        result.marked_inactive += 1;
-                    } else {
-                        result.still_active += 1;
-                    }
-                }
+                    .map_err(|e| e.to_string())?;
+                let applied = self.reconcile_feed_checks(checks).await?;
+                result.total_checked += applied.total_checked;
+                result.marked_inactive += applied.marked_inactive;
+                result.still_active += applied.still_active;
+                self.repository
+                    .mark_feed_history_synced(chunk, through)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                processed += chunk.len();
+                self.progress(processed, total).await;
             }
         }
         self.repository
             .update_sync_checkpoint(through)
             .await
             .map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    async fn reconcile_feed_checks(
+        &self,
+        checks: Vec<crate::ads_api::models::CheckFeedItem>,
+    ) -> Result<SyncResult, String> {
+        let mut newest = std::collections::BTreeMap::new();
+        for check in checks {
+            let time = check
+                .time
+                .as_deref()
+                .and_then(parse_moscow)
+                .ok_or("Invalid actuality timestamp; checkpoint unchanged")?;
+            if time > Utc::now() + Duration::minutes(5) {
+                return Err("Actuality timestamp is in the future".into());
+            }
+            // Although documented as 0/1, the live feed can contain 11 (a scrape, not a check).
+            if !matches!(check.is_actual, 0 | 1) {
+                continue;
+            }
+            let entry = newest.entry(check.id).or_insert((time, check.is_actual));
+            if time > entry.0 {
+                *entry = (time, check.is_actual);
+            }
+        }
+        let mut result = SyncResult::default();
+        for (id, (time, status)) in newest {
+            let Some(local) = self
+                .repository
+                .get_listing_by_id(id)
+                .await
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if local.source_time.is_some_and(|v| v > time)
+                || local.actuality_checked_at.is_some_and(|v| v >= time)
+            {
+                continue;
+            }
+            // A historical removal may precede a republication absent from our local snapshot.
+            // Refresh the latest provider version before accepting either historical outcome.
+            let Some((source, source_id)) =
+                crate::actuality::source_identity(&local.source, &local.url)
+            else {
+                continue;
+            };
+            let Some(latest) = self
+                .api_client
+                .get_latest_source_listing(source, &source_id)
+                .await
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if latest.id != id {
+                return Err(format!("Provider returned a different listing for {id}"));
+            }
+            let (snapshot, photos) = DbListing::from_api_listing(&latest, &local.city);
+            if snapshot.source_time.is_none() {
+                continue;
+            }
+            self.repository
+                .upsert_listing_with_images(&snapshot, &photos)
+                .await
+                .map_err(|e| e.to_string())?;
+            if self
+                .repository
+                .apply_actuality(id, status == 1, time)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                result.total_checked += 1;
+                if status == 0 {
+                    result.marked_inactive += 1;
+                } else {
+                    result.still_active += 1;
+                }
+            }
+        }
         Ok(result)
     }
     pub async fn check_actuality_by_ids(
@@ -844,21 +957,65 @@ impl Collector {
             .check_actuality_by_ids(ids)
             .await
             .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for row in rows {
-            if let Some(time) = row.time.as_deref().and_then(parse_moscow) {
-                self.repository
-                    .apply_actuality(row.id, row.is_actual != 0, time)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            out.push(CheckActualityResult {
+        self.reconcile_feed_checks(rows.clone()).await?;
+        let out = rows
+            .into_iter()
+            .map(|row| CheckActualityResult {
                 id: row.id,
                 is_actual: row.is_actual,
                 checked_at: row.time,
-            });
-        }
+            })
+            .collect();
         Ok(out)
+    }
+
+    pub async fn import_recorded_checks(
+        &self,
+        checks: Vec<crate::ads_api::models::CheckFeedItem>,
+    ) -> Result<SyncResult, String> {
+        self.perform(
+            self.reserve()?,
+            JobPhase::SyncingActuality,
+            self.reconcile_feed_checks(checks),
+        )
+        .await
+    }
+
+    pub async fn request_reparse(&self, id: i64) -> Result<bool, String> {
+        self.perform(self.reserve()?, JobPhase::SyncingActuality, async {
+            if let Some(queued) = self
+                .repository
+                .recent_reparse_request(id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(queued);
+            }
+            let listing = self
+                .repository
+                .get_listing_by_id(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Listing not found")?;
+            if !matches!(
+                listing.source.as_str(),
+                "avito.ru" | "cian.ru" | "realty.yandex.ru"
+            ) || crate::actuality::source_identity(&listing.source, &listing.url).is_none()
+            {
+                return Err("Повторный сбор этого источника не поддерживается".into());
+            }
+            let queued = self
+                .api_client
+                .request_reparse(&listing.url)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.repository
+                .save_reparse_request(id, queued)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(queued)
+        })
+        .await
     }
 }
 fn api_time(time: DateTime<Utc>) -> String {

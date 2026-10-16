@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO listings (id, source, url, title, description, price, city, address,\n                lat, lng, rooms, area, floor, floors_total, person_type, params,\n                time_created, time_updated, fetched_at, is_active, source_time, feed_is_actual, feed_observed_at)\n            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)\n            ON CONFLICT (id) DO UPDATE SET source = EXCLUDED.source, url = EXCLUDED.url,\n                title = EXCLUDED.title, description = EXCLUDED.description, price = EXCLUDED.price,\n                city = EXCLUDED.city, address = EXCLUDED.address, lat = EXCLUDED.lat, lng = EXCLUDED.lng,\n                rooms = EXCLUDED.rooms, area = EXCLUDED.area, floor = EXCLUDED.floor,\n                floors_total = EXCLUDED.floors_total, person_type = EXCLUDED.person_type,\n                params = EXCLUDED.params, time_created = EXCLUDED.time_created,\n                time_updated = EXCLUDED.time_updated, fetched_at = EXCLUDED.fetched_at,\n                source_time = EXCLUDED.source_time,\n                feed_is_actual = EXCLUDED.feed_is_actual, feed_observed_at = EXCLUDED.feed_observed_at,\n                is_active = CASE WHEN listings.actuality_checked_at IS NOT NULL AND\n                    (EXCLUDED.source_time IS NULL OR listings.actuality_checked_at >= EXCLUDED.source_time)\n                    THEN listings.is_active ELSE EXCLUDED.is_active END\n            WHERE listings.source_time IS NULL OR EXCLUDED.source_time >= listings.source_time\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Float8",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Jsonb",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Bool",
+        "Timestamptz",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4a5f228d8e7a2e2ba14464a712879f239a64f707d0882ed0c3d85da5e37615e8"
+}

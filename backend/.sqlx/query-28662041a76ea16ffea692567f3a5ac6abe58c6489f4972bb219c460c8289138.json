@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT queued FROM listing_reparse_requests WHERE listing_id = $1 AND requested_at > NOW() - INTERVAL '1 day'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "queued",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "28662041a76ea16ffea692567f3a5ac6abe58c6489f4972bb219c460c8289138"
+}

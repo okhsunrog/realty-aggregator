@@ -145,29 +145,36 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }));
+    let (startup_sync_done, startup_sync_ready) = tokio::sync::oneshot::channel::<()>();
     if config.api.sync.enabled {
         let scheduled_collector = collector.clone();
         let hours = config.api.sync.interval_hours;
         let period = std::time::Duration::from_secs(hours as u64 * 3600);
         scheduled_tasks.push(tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            let mut startup_sync_done = Some(startup_sync_done);
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now(), period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
                 if let Err(error) = scheduled_collector.run_scheduled(Job::Sync { hours }).await {
                     tracing::warn!(%error, "Scheduled actuality sync failed");
                 }
+                if let Some(done) = startup_sync_done.take() {
+                    let _ = done.send(());
+                }
             }
         }));
+    } else {
+        drop(startup_sync_done);
     }
 
     if config.actuality.enabled {
         let source_collector = collector.clone();
         let period = std::time::Duration::from_secs(config.actuality.interval_minutes as u64 * 60);
         scheduled_tasks.push(tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // Import provider removals before spending requests on original pages.
+            let _ = startup_sync_ready.await;
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now(), period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;

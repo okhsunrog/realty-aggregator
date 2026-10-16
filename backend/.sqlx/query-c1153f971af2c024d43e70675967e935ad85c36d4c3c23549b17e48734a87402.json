@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.source,\n            COUNT(*) AS \"total!\",\n            COUNT(*) FILTER (WHERE l.is_active = false) AS \"removed!\",\n            COUNT(*) FILTER (WHERE l.is_active = true AND l.actuality_checked_at >= $1\n                AND l.actuality_origin IN ('source_page', 'check_feed', 'manual')\n                AND (l.source_time IS NULL OR l.actuality_checked_at >= l.source_time)) AS \"confirmed!\",\n            COUNT(*) FILTER (WHERE l.source_checked_at IS NULL) AS \"unchecked!\",\n            MAX(h.retry_after) AS retry_after, MAX(h.last_error) AS last_error\n            FROM listings l LEFT JOIN source_check_hosts h ON h.source = l.source\n            GROUP BY l.source ORDER BY l.source",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "removed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "confirmed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "unchecked!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "retry_after",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c1153f971af2c024d43e70675967e935ad85c36d4c3c23549b17e48734a87402"
+}

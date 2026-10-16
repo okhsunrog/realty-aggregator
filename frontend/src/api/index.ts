@@ -38,6 +38,12 @@ export interface Listing {
   actuality_checked_at: string | null
   actuality_origin: string
   source_time: string | null
+  feed_is_actual: number | null
+  feed_observed_at: string | null
+  source_confirmed_status: 'active' | 'inactive' | null
+  source_confirmed_at: string | null
+  availability_state: 'confirmed' | 'removed' | 'recently_seen' | 'unconfirmed'
+  confirmation_expires_at: string | null
   source_check_status: 'active' | 'inactive' | 'unknown' | null
   source_checked_at: string | null
   source_check_http_status: number | null
@@ -71,6 +77,11 @@ export interface ListingImage {
 export interface Stats {
   total_listings: number
   active_listings: number
+  confirmed_listings: number
+  removed_listings: number
+  unconfirmed_listings: number
+  actuality_synced_at: string | null
+  availability: { source: string; total: number; confirmed: number; removed: number; unchecked: number; retry_after: string | null; last_error: string | null }[]
   images: {
     total: number
     downloaded: number
@@ -210,12 +221,17 @@ export async function fetchPriceHistory(id: number): Promise<PriceObservation[]>
 export async function startSourceCheck(id: number, signal?: AbortSignal): Promise<CollectionResponse> {
   return handleResponse(await fetch(`/api/listings/${id}/check-source`, { method: 'POST', signal }))
 }
+export function hasFreshConfirmation(listing: Listing): boolean {
+  return listing.availability_state === 'confirmed' && !!listing.confirmation_expires_at && Date.parse(listing.confirmation_expires_at) >= Date.now()
+}
 export function sourceStatusLabel(listing: Listing): string {
-  if (!listing.is_active) return 'Неактивно'
-  if (listing.source_time && listing.source_checked_at && Date.parse(listing.source_time) > Date.parse(listing.source_checked_at)) return 'Нужна повторная проверка'
-  if (listing.source_check_status === 'active') return 'Проверено: активно'
-  if (listing.source_check_status === 'inactive') return 'Проверено: недоступно'
-  return 'Актуальность не подтверждена'
+  if (listing.availability_state === 'removed') return 'Снято по последним сведениям'
+  if (hasFreshConfirmation(listing)) return 'Актуальность подтверждена'
+  if (listing.availability_state === 'recently_seen') return 'Недавно встречалось в сборе'
+  return 'Нет свежего подтверждения'
+}
+export function feedStatusLabel(status: number | null): string {
+  return ({ 0: 'снято по данным провайдера', 1: 'есть результат проверки провайдера', 11: 'объявление встречалось в сборе' } as Record<number, string>)[status ?? -1] ?? 'статус не сохранён'
 }
 
 export function sourceOriginLabel(origin: string): string {
@@ -230,4 +246,8 @@ export function roomLabel(room: string): string {
 
 export async function fetchSettings(): Promise<{ models: string[]; default_model: string; source_check_ttl_hours: number }> {
   return handleResponse(await fetch('/api/settings'))
+}
+
+export async function requestReparse(id: number): Promise<{ queued: boolean; message: string }> {
+  return handleResponse(await fetch(`/api/listings/${id}/request-reparse`, { method: 'POST' }))
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, source, url, title, description, price, city, address,\n                   lat, lng, rooms, area, floor, floors_total, person_type, params,\n                   time_created, time_updated, fetched_at, is_active,\n                   analysis_condition, analysis_is_shell, analysis_move_in_ready,\n                   analysis_red_flags, analysis_summary, analysis_model,\n                   analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,\n                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason\n            FROM listings\n            WHERE ($1::bigint IS NULL OR price >= $1)\n              AND ($2::bigint IS NULL OR price <= $2)\n              AND ($3::int IS NULL OR rooms = $3)\n              AND ($4 = false OR analyzed_at IS NOT NULL)\n              AND ($5 = false OR analysis_is_shell IS NOT TRUE)\n              AND ($6 = false OR is_active = true)\n              AND ($7::text IS NULL OR params->>'Вид объекта' = $7)\n              AND ($8::bool IS NULL OR analysis_is_shell = $8)\n              AND ($9::int IS NULL OR analysis_condition >= $9)\n              AND ($10::int IS NULL OR analysis_condition <= $10)\n              AND ($13::float8 IS NULL OR area >= $13)\n              AND ($14::bool IS NULL OR analysis_move_in_ready = $14)\n              AND ($15 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))\n              AND ($16 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))\n\n              AND ($17::timestamptz IS NULL OR (source_check_status = 'active' AND source_checked_at >= $17 AND (source_time IS NULL OR source_checked_at >= source_time)))\n            ORDER BY fetched_at DESC, id DESC\n            LIMIT $11 OFFSET $12\n            ",
+  "query": "\n            SELECT id, source, url, title, description, price, city, address,\n                   lat, lng, rooms, area, floor, floors_total, person_type, params,\n                   time_created, time_updated, fetched_at, is_active,\n                   analysis_condition, analysis_is_shell, analysis_move_in_ready,\n                   analysis_red_flags, analysis_summary, analysis_model,\n                   analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,\n                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason,\n                   feed_is_actual, feed_observed_at, source_confirmed_status, source_confirmed_at\n            FROM listings WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -182,27 +182,31 @@
         "ordinal": 35,
         "name": "source_check_reason",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 36,
+        "name": "feed_is_actual",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 37,
+        "name": "feed_observed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 38,
+        "name": "source_confirmed_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 39,
+        "name": "source_confirmed_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Int8",
-        "Int4",
-        "Bool",
-        "Bool",
-        "Bool",
-        "Text",
-        "Bool",
-        "Int4",
-        "Int4",
-        "Int8",
-        "Int8",
-        "Float8",
-        "Bool",
-        "Bool",
-        "Bool",
-        "Timestamptz"
+        "Int8"
       ]
     },
     "nullable": [
@@ -241,8 +245,12 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "ba7d3df9f728033fa8fc94ec1c1d31d17274a3f1cad25accce907fc2c35738b2"
+  "hash": "4cc7d500b00032aa86b35c95d0aa706df12fda8af455cb0b734ab12558901349"
 }

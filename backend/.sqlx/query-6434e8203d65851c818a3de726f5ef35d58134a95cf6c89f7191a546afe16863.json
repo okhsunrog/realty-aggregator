@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO listing_reviews(listing_id,favorite) VALUES (1,true)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6434e8203d65851c818a3de726f5ef35d58134a95cf6c89f7191a546afe16863"
+}

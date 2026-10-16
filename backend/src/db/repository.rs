@@ -119,8 +119,8 @@ impl Repository {
         let accepted = sqlx::query!(r#"
             INSERT INTO listings (id, source, url, title, description, price, city, address,
                 lat, lng, rooms, area, floor, floors_total, person_type, params,
-                time_created, time_updated, fetched_at, is_active, source_time)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+                time_created, time_updated, fetched_at, is_active, source_time, feed_is_actual, feed_observed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
             ON CONFLICT (id) DO UPDATE SET source = EXCLUDED.source, url = EXCLUDED.url,
                 title = EXCLUDED.title, description = EXCLUDED.description, price = EXCLUDED.price,
                 city = EXCLUDED.city, address = EXCLUDED.address, lat = EXCLUDED.lat, lng = EXCLUDED.lng,
@@ -129,13 +129,15 @@ impl Repository {
                 params = EXCLUDED.params, time_created = EXCLUDED.time_created,
                 time_updated = EXCLUDED.time_updated, fetched_at = EXCLUDED.fetched_at,
                 source_time = EXCLUDED.source_time,
-                is_active = CASE WHEN listings.actuality_checked_at > EXCLUDED.source_time
+                feed_is_actual = EXCLUDED.feed_is_actual, feed_observed_at = EXCLUDED.feed_observed_at,
+                is_active = CASE WHEN listings.actuality_checked_at IS NOT NULL AND
+                    (EXCLUDED.source_time IS NULL OR listings.actuality_checked_at >= EXCLUDED.source_time)
                     THEN listings.is_active ELSE EXCLUDED.is_active END
             WHERE listings.source_time IS NULL OR EXCLUDED.source_time >= listings.source_time
             "#, l.id, &l.source, &l.url, l.title.as_deref(), l.description.as_deref(), l.price,
             &l.city, l.address.as_deref(), l.lat, l.lng, l.rooms, l.area, l.floor, l.floors_total,
             l.person_type, l.params.as_ref(), l.time_created, l.time_updated, l.fetched_at,
-            l.is_active, l.source_time).execute(&mut *tx).await?.rows_affected() > 0;
+            l.is_active, l.source_time, l.feed_is_actual, l.feed_observed_at).execute(&mut *tx).await?.rows_affected() > 0;
         if !accepted {
             tx.commit().await?;
             return Ok(false);
@@ -593,7 +595,8 @@ impl Repository {
                    analysis_condition, analysis_is_shell, analysis_move_in_ready,
                    analysis_red_flags, analysis_summary, analysis_model,
                    analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,
-                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason
+                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason,
+                   feed_is_actual, feed_observed_at, source_confirmed_status, source_confirmed_at
             FROM listings
             WHERE ($1::bigint IS NULL OR price >= $1)
               AND ($2::bigint IS NULL OR price <= $2)
@@ -610,7 +613,7 @@ impl Repository {
               AND ($15 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))
               AND ($16 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))
 
-              AND ($17::timestamptz IS NULL OR (source_check_status = 'active' AND source_checked_at >= $17 AND (source_time IS NULL OR source_checked_at >= source_time)))
+              AND ($17::timestamptz IS NULL OR (is_active = true AND actuality_checked_at >= $17 AND actuality_origin IN ('source_page', 'check_feed', 'manual') AND (source_time IS NULL OR actuality_checked_at >= source_time)))
             ORDER BY fetched_at DESC, id DESC
             LIMIT $11 OFFSET $12
             "#,
@@ -648,7 +651,7 @@ impl Repository {
               AND ($13 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))
               AND ($14 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))
 
-              AND ($15::timestamptz IS NULL OR (source_check_status = 'active' AND source_checked_at >= $15 AND (source_time IS NULL OR source_checked_at >= source_time)))
+              AND ($15::timestamptz IS NULL OR (is_active = true AND actuality_checked_at >= $15 AND actuality_origin IN ('source_page', 'check_feed', 'manual') AND (source_time IS NULL OR actuality_checked_at >= source_time)))
             "#,
             min_price,
             max_price,
@@ -678,7 +681,8 @@ impl Repository {
                    analysis_condition, analysis_is_shell, analysis_move_in_ready,
                    analysis_red_flags, analysis_summary, analysis_model,
                    analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,
-                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason
+                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason,
+                   feed_is_actual, feed_observed_at, source_confirmed_status, source_confirmed_at
             FROM listings WHERE id = $1
             "#,
             id
@@ -778,6 +782,8 @@ impl Repository {
         let active = check.status == crate::actuality::SourceStatus::Active;
         sqlx::query!(r#"UPDATE listings SET source_check_status = $2, source_checked_at = $3,
             source_check_http_status = $4, source_check_reason = $5,
+            source_confirmed_status = CASE WHEN $6 THEN $2 ELSE source_confirmed_status END,
+            source_confirmed_at = CASE WHEN $6 THEN $3 ELSE source_confirmed_at END,
             is_active = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $7 ELSE is_active END,
             actuality_checked_at = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $3 ELSE actuality_checked_at END,
             actuality_origin = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN 'source_page' ELSE actuality_origin END
@@ -789,19 +795,106 @@ impl Repository {
     }
     pub async fn get_source_check_queue(
         &self,
+        source: &str,
         limit: i64,
         recheck_hours: i32,
     ) -> Result<Vec<i64>, sqlx::Error> {
         sqlx::query_scalar!(
-            r#"SELECT id FROM listings WHERE is_active = true
+            r#"SELECT id FROM listings WHERE source = $3 AND
+            (is_active = true OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))
             AND (source_checked_at IS NULL OR source_checked_at < NOW() - INTERVAL '1 hour' * $2::int
                 OR source_time > source_checked_at)
-            ORDER BY source_checked_at NULLS FIRST, fetched_at DESC, id DESC LIMIT $1"#,
+            ORDER BY EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite) DESC,
+                source_checked_at NULLS FIRST, source_time DESC NULLS LAST, id DESC LIMIT $1"#,
             limit,
-            recheck_hours
+            recheck_hours,
+            source
         )
         .fetch_all(&self.pool)
         .await
+    }
+
+    pub async fn source_ready(&self, source: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar!(
+            r#"SELECT NOT EXISTS (SELECT 1 FROM source_check_hosts
+            WHERE source = $1 AND retry_after > NOW()) AS "ready!""#,
+            source
+        )
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn record_source_attempt(
+        &self,
+        source: &str,
+        check: &crate::actuality::SourceCheck,
+    ) -> Result<(), sqlx::Error> {
+        let delay: i32 = match check.failure_kind {
+            Some("blocked") => 21600,
+            Some(_) => 900,
+            None => 0,
+        };
+        sqlx::query!(r#"INSERT INTO source_check_hosts (source, failures, retry_after, last_error, checked_at)
+            VALUES ($1, CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
+                CASE WHEN $3 > 0 THEN $2::timestamptz + $3 * INTERVAL '1 second' ELSE NULL END,
+                CASE WHEN $3 > 0 THEN $4::text ELSE NULL END, $2)
+            ON CONFLICT (source) DO UPDATE SET
+                failures = CASE WHEN $3 > 0 THEN LEAST(source_check_hosts.failures + 1, 10) ELSE 0 END,
+                retry_after = CASE WHEN $3 > 0 THEN $2::timestamptz + LEAST(86400, $3 * power(2, LEAST(source_check_hosts.failures, 5))) * INTERVAL '1 second' ELSE NULL END,
+                last_error = CASE WHEN $3 > 0 THEN $4 ELSE NULL END, checked_at = $2"#,
+            source, check.checked_at, delay, &check.reason).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn feed_sync_ids(&self, pending: bool) -> Result<Vec<i64>, sqlx::Error> {
+        sqlx::query_scalar!(
+            "SELECT id FROM listings WHERE (feed_history_synced_at IS NULL) = $1 ORDER BY id",
+            pending
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn recent_reparse_request(&self, id: i64) -> Result<Option<bool>, sqlx::Error> {
+        sqlx::query_scalar!("SELECT queued FROM listing_reparse_requests WHERE listing_id = $1 AND requested_at > NOW() - INTERVAL '1 day'", id)
+            .fetch_optional(&self.pool).await
+    }
+
+    pub async fn save_reparse_request(&self, id: i64, queued: bool) -> Result<(), sqlx::Error> {
+        sqlx::query!("INSERT INTO listing_reparse_requests(listing_id,requested_at,queued) VALUES ($1,NOW(),$2) ON CONFLICT(listing_id) DO UPDATE SET requested_at = NOW(), queued = $2", id, queued)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn mark_feed_history_synced(
+        &self,
+        ids: &[i64],
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            "UPDATE listings SET feed_history_synced_at = $2 WHERE id = ANY($1)",
+            ids,
+            at
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_availability_stats(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<AvailabilityStats>, sqlx::Error> {
+        sqlx::query_as!(AvailabilityStats, r#"SELECT l.source,
+            COUNT(*) AS "total!",
+            COUNT(*) FILTER (WHERE l.is_active = false) AS "removed!",
+            COUNT(*) FILTER (WHERE l.is_active = true AND l.actuality_checked_at >= $1
+                AND l.actuality_origin IN ('source_page', 'check_feed', 'manual')
+                AND (l.source_time IS NULL OR l.actuality_checked_at >= l.source_time)) AS "confirmed!",
+            COUNT(*) FILTER (WHERE l.source_checked_at IS NULL) AS "unchecked!",
+            MAX(h.retry_after) AS retry_after, MAX(h.last_error) AS last_error
+            FROM listings l LEFT JOIN source_check_hosts h ON h.source = l.source
+            GROUP BY l.source ORDER BY l.source"#, cutoff).fetch_all(&self.pool).await
     }
 
     pub async fn get_listing_ids(&self) -> Result<Vec<i64>, sqlx::Error> {
@@ -854,6 +947,17 @@ impl Repository {
             .map(|row| serde_json::json!({"observed_at": row.observed_at, "price": row.price}))
             .collect())
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AvailabilityStats {
+    pub source: String,
+    pub total: i64,
+    pub removed: i64,
+    pub confirmed: i64,
+    pub unchecked: i64,
+    pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]

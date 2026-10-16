@@ -372,7 +372,7 @@ void loadFromRoute()
 
       <!-- Stats -->
       <n-descriptions v-if="store.stats" :column="4" label-placement="top" size="small">
-        <n-descriptions-item label="Объявлений">
+        <n-descriptions-item label="В подборе / всего">
           {{ store.stats.active_listings }} / {{ store.stats.total_listings }}
         </n-descriptions-item>
         <n-descriptions-item label="Изображений">
@@ -394,6 +394,19 @@ void loadFromRoute()
       <n-alert v-else-if="!backendError" type="warning">
         Не удалось загрузить статистику
       </n-alert>
+      <n-space v-if="store.stats" vertical size="small" style="margin-top: 12px">
+        <n-space>
+          <n-tag type="success">Свежее подтверждение: {{ store.stats.confirmed_listings }}</n-tag>
+          <n-tag type="warning">Без свежего подтверждения: {{ store.stats.unconfirmed_listings }}</n-tag>
+          <n-tag>Снято по последним сведениям: {{ store.stats.removed_listings }}</n-tag>
+        </n-space>
+        <div v-for="source in store.stats.availability.filter(s => s.retry_after && Date.parse(s.retry_after) > Date.now())" :key="source.source" style="color: #888; font-size: 0.85em">
+          {{ source.source }}: проверка приостановлена до {{ new Date(source.retry_after!).toLocaleString('ru-RU') }}. {{ source.last_error }}
+        </div>
+        <div style="color: #888; font-size: 0.85em">Наличие в подборе не подтверждает, что квартира ещё продаётся. Подтверждение актуальности действует ограниченное время.</div>
+      </n-space>
+
+
     </n-card>
 
     <!-- Filters -->

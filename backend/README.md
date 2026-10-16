@@ -49,7 +49,7 @@ database, then run from this directory:
 cargo sqlx migrate run
 SQLX_OFFLINE=false cargo sqlx prepare -- --all-targets --locked
 SQLX_OFFLINE=false cargo sqlx prepare --check -- --all-targets --locked
-cargo test --lib --test repository --locked
+cargo test --lib --test repository --test availability --locked
 ```
 
 Commit the updated `.sqlx/` files together with the SQL changes. Add new migration
@@ -98,6 +98,15 @@ cannot override a newer source observation. Missing IDs remain unchanged. These
 are recorded checks, not a request to check a site immediately. Coverage and
 freshness depend on the upstream service; see [ADS API documentation](https://ads-api.ru/api).
 
+Sync runs immediately on startup and every six hours in the supplied config.
+Each newly imported record gets its complete recorded history once; subsequent
+runs resume from the durable checkpoint. Before applying a historical outcome,
+the collector retrieves the latest provider version to account for republication.
+Only statuses 0 and 1 count as checks: the live check feed also sometimes returns
+11, which only means the provider scraped the listing. Missing results never
+deactivate a record. Raw `feed_is_actual` and retrieval time remain available
+separately from the dated definitive observation.
+
 The command below previews recorded checks without changing the database:
 
 ```sh
@@ -140,22 +149,43 @@ The model API client keeps ordinary routing. The configured interface must remai
 available; change it and restart the service after switching physical networks.
 The implementation does not change system routing or turn off the VPN.
 
-`actuality` in TOML controls the original-page queue (20 records per hourly run,
-24 hours between checks, 10 seconds between requests by default). Checks allow
+`actuality.sources` in TOML controls separate source batches: 40 Yandex, 11 Youla,
+2 Cian and 2 Avito records per hourly run by default. The queue starts on startup,
+prioritizes favorites, and leaves 24 hours between checks of each record and
+10 seconds between requests. A blocked source pauses for 6 hours, doubling to
+a maximum of 24 hours after repeated failures; network failures start at
+15 minutes. These pauses persist across restarts and do not hold up other sources.
+Explicit checks respect the same pause. Checks allow
 only supported HTTPS sources and restrict redirects to those domains. They use
 explicit removal notices or an Offer availability value attached to the original
-listing in JSON-LD. A successful HTTP response alone does not establish activity.
+listing in JSON-LD. Youla checks the matching product ID in its embedded JSON
+state, including archived, sold, deleted and blocked flags; `youla.io` and
+`youla.ru` are equivalent hosts. Conflicting structured statuses remain unknown.
+A successful HTTP response alone does not establish activity.
 Unqualified 404, captcha, access denial, redirects to other pages, timeouts and
 ambiguous markup remain unknown and do not deactivate records. The last attempt
 and the last definite observation are stored separately. Source observations
 cannot override a newer source snapshot. Changes in upstream markup can reduce
 coverage; open the original and contact the seller before relying on the status.
 
-`GET /api/listings?verified_only=true` selects recent positive original-page
-checks using `actuality.recheck_hours`. `POST /api/check-sources` accepts
+`GET /api/listings?verified_only=true` selects recent positive definitive
+observations (original page, dated provider check, or manual observation), using
+`actuality.recheck_hours`. A later failed attempt does not erase a still-fresh
+confirmation. A newer publication invalidates an older confirmation.
+API responses expose `availability_state` and `confirmation_expires_at`.
+The UI separates confirmed, unconfirmed and removed counts; `active_listings`
+remains a compatibility field meaning records not currently marked removed.
+`POST /api/check-sources` accepts
 `{"ids":[123]}`; an empty ID list checks the next configured queue batch.
 `POST /api/listings/123/check-source` checks a single original card. Both use the
 same job admission guard as collection and analysis.
+
+`POST /api/listings/123/request-reparse` requests an ADS API parse of an Avito,
+Cian or Yandex original URL. The provider skips records seen within 31 days;
+queue completion time is unspecified. Successful requests are cached locally
+for one day. Acceptance does not change activity status. A successful later
+parse will arrive through normal collection. This is exposed as a deliberate
+per-listing action, not an automatic bulk job.
 
 The first collection is deliberately bounded with the maintenance CLI; it does
 not move the full collection checkpoint:

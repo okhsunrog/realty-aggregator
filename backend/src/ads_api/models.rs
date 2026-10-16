@@ -68,6 +68,8 @@ pub struct ListingsQuery {
     pub user: String,
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub avitoid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub category_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,

@@ -247,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
                     .save_source_check(
                         l.id,
                         &backend::actuality::SourceCheck {
+                            failure_kind: None,
                             status,
                             checked_at,
                             http_status: l.source_check_http_status,

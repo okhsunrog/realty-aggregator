@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT source_url FROM images WHERE listing_id = $1 ORDER BY image_index",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_url",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f7c4dafb1b1166f90ea53b669c7659a858b44b5368adf12a5264e8ebc831e628"
+}

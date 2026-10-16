@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s3_key FROM images WHERE id = $1 AND status = 'downloaded'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "8918862604c93f582bfcc42d9c93cf0da888768e24b5ff0d826b6012b06ab717"
+}

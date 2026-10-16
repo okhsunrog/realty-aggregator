@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO listing_reviews (listing_id, favorite, hidden, stage, notes) VALUES ($1,$2,$3,$4,$5)\n            ON CONFLICT (listing_id) DO UPDATE SET favorite = EXCLUDED.favorite, hidden = EXCLUDED.hidden,\n                stage = EXCLUDED.stage, notes = EXCLUDED.notes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "877ee7c8660bc662c606eb5fe5bc595c365e816cd14ca621b91aa1357c6817f5"
+}

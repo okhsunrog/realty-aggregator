@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -61,6 +61,15 @@ pub struct DbListing {
     pub time_created: Option<DateTime<Utc>>,
     pub time_updated: Option<DateTime<Utc>>,
     pub fetched_at: DateTime<Utc>,
+    pub source_time: Option<DateTime<Utc>>,
+    pub analysis_attempts: i32,
+    pub analysis_last_error: Option<String>,
+    pub actuality_checked_at: Option<DateTime<Utc>>,
+    pub actuality_origin: String,
+    pub source_check_status: Option<String>,
+    pub source_checked_at: Option<DateTime<Utc>>,
+    pub source_check_http_status: Option<i32>,
+    pub source_check_reason: Option<String>,
     pub is_active: Option<bool>,
     // Analysis fields
     pub analysis_condition: Option<i32>,
@@ -100,41 +109,53 @@ impl DbListing {
             .params
             .as_ref()
             .and_then(|p| p.get("Количество комнат"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<i32>().ok());
+            .and_then(parse_integer_param);
 
         let area = listing
             .params
             .as_ref()
-            .and_then(|p| p.get("Площадь"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok());
+            .and_then(|params| {
+                params
+                    .get("Площадь")
+                    .or_else(|| params.get("Общая площадь"))
+            })
+            .and_then(|value| {
+                value.as_f64().or_else(|| {
+                    value.as_str().and_then(|text| {
+                        let number: String = text
+                            .trim()
+                            .chars()
+                            .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == ',')
+                            .collect();
+                        number.replace(',', ".").parse::<f64>().ok()
+                    })
+                })
+            })
+            .filter(|area| area.is_finite() && *area > 0.0);
 
         let floor = listing
             .params
             .as_ref()
             .and_then(|p| p.get("Этаж"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<i32>().ok());
+            .and_then(parse_integer_param);
 
         let floors_total = listing
             .params
             .as_ref()
             .and_then(|p| p.get("Этажей в доме"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<i32>().ok());
+            .and_then(parse_integer_param);
 
         let time_created = listing
             .time_source_created
             .as_ref()
             .and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").ok())
-            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc) - Duration::hours(3));
 
         let time_updated = listing
             .time_source_updated
             .as_ref()
             .and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").ok())
-            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc) - Duration::hours(3));
 
         let db_listing = Self {
             id: listing.id,
@@ -142,7 +163,7 @@ impl DbListing {
             url: listing.url.clone(),
             title: listing.title.clone(),
             description: listing.description.clone(),
-            price: listing.price,
+            price: listing.price.filter(|price| *price > 0),
             city: listing.city.clone().unwrap_or_else(|| city.to_string()),
             address: listing.address.clone(),
             lat,
@@ -156,6 +177,23 @@ impl DbListing {
             time_created,
             time_updated,
             fetched_at: Utc::now(),
+            source_time: listing
+                .time
+                .as_deref()
+                .and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").ok())
+                .map(|dt| {
+                    DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc) - Duration::minutes(150)
+                })
+                .or(time_updated)
+                .or(time_created),
+            analysis_attempts: 0,
+            analysis_last_error: None,
+            actuality_checked_at: None,
+            actuality_origin: "source_feed".to_owned(),
+            source_check_status: None,
+            source_checked_at: None,
+            source_check_http_status: None,
+            source_check_reason: None,
             is_active: Some(listing.is_actual.map(|a| a != 0).unwrap_or(true)),
             // Analysis fields - populated separately
             analysis_condition: None,
@@ -196,6 +234,9 @@ pub struct DbImage {
     pub ai_description: Option<String>,
     pub ai_model: Option<String>,
     pub ai_analyzed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ai_attempts: i32,
+    pub ai_last_error: Option<String>,
 
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -250,6 +291,8 @@ pub struct CollectionState {
     pub id: i32,
     pub last_listing_id: Option<i64>,
     pub last_collection_at: Option<DateTime<Utc>>,
+    pub query_fingerprint: Option<String>,
+    pub last_sync_at: Option<DateTime<Utc>>,
 }
 
 /// Per-image analysis result.
@@ -266,9 +309,9 @@ pub struct ImageAnalysisResult {
 /// Listing-level analysis result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListingAnalysisResult {
-    pub overall_condition: i32,
-    pub is_shell: bool,
-    pub move_in_ready: bool,
+    pub overall_condition: Option<i32>,
+    pub is_shell: Option<bool>,
+    pub move_in_ready: Option<bool>,
     pub red_flags: Vec<String>,
     pub summary: String,
 }
@@ -279,4 +322,31 @@ pub struct OldListingInfo {
     pub id: i64,
     pub price: Option<i64>,
     pub created_at: Option<DateTime<Utc>>,
+}
+
+impl ListingAnalysisResult {
+    pub fn unknown(reason: &str) -> Self {
+        Self {
+            overall_condition: None,
+            is_shell: None,
+            move_in_ready: None,
+            red_flags: vec![],
+            summary: reason.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Default)]
+pub struct ListingReview {
+    pub favorite: bool,
+    pub hidden: bool,
+    pub stage: String,
+    pub notes: String,
+}
+
+fn parse_integer_param(value: &serde_json::Value) -> Option<i32> {
+    value
+        .as_i64()
+        .and_then(|n| i32::try_from(n).ok())
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
 }

@@ -3,6 +3,8 @@
 [api]
 # Collection interval (minutes)
 collect_interval_minutes = 60
+max_downloads_per_run = 100
+initial_load_days = 90
 
 # Delay between API requests (seconds, minimum 5 per API requirements)
 request_delay_seconds = 6
@@ -31,10 +33,10 @@ city = "Кабардино-Балкария"
 is_actual = "11,1"
 
 # Price from (RUB)
-price1 = 1400000
+price1 = 0
 
 # Price to (RUB)
-price2 = 2100000
+price2 = 5000000
 
 # Area from (m²)
 area_from = 33
@@ -54,10 +56,11 @@ image_path_template = "{listing_id}/{index}.jpg"
 # OpenAI-compatible API. Credentials stay in the named environment variable.
 api_base_url = "https://aiproxy.okhsunrog.ru/v1"
 api_key_env = "MY_AI_PROXY"
+allowed_models = ["gpt-6-luna"]
 
 # Enable automatic analysis after data collection
 # If false - listings will wait for manual analysis trigger
-auto_analyze = true
+auto_analyze = false
 
 # Model for per-image analysis (first layer)
 image_model = "gpt-6-luna"
@@ -76,6 +79,7 @@ enabled = true
 
 # Minimum number of photos (listings without photos are not analyzed)
 min_photos = 1
+max_photos = 8
 
 # Optional filters (uncomment if needed)
 # max_photos = 20           # Max photos to analyze (rest ignored)
@@ -85,3 +89,10 @@ min_photos = 1
 # max_area = 200.0          # Maximum area (m²)
 # sources = ["avito", "cian"]  # Only specified sources
 # require_coords = false    # Require coordinates
+
+[actuality]
+enabled = true
+interval_minutes = 60
+batch_size = 20
+recheck_hours = 24
+request_delay_seconds = 10

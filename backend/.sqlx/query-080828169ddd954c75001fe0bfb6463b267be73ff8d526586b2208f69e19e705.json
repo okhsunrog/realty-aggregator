@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, listing_id, image_index, source_url, s3_key\n            FROM images\n            WHERE status = 'downloaded'\n              AND ai_analyzed_at IS NULL\n            ORDER BY listing_id, image_index\n            LIMIT $1\n            ",
+  "query": "\n            SELECT id, listing_id, image_index, source_url, s3_key\n            FROM images\n            WHERE status = 'downloaded'\n              AND ai_analyzed_at IS NULL AND ai_attempts < $2\n              AND (ai_retry_at IS NULL OR ai_retry_at <= NOW()) AND image_index < $3\n              AND ($4::bigint IS NULL OR listing_id = $4)\n              AND EXISTS (SELECT 1 FROM listings l WHERE l.id = images.listing_id AND l.is_active = true)\n            ORDER BY listing_id, image_index\n            LIMIT $1\n            ",
   "describe": {
     "columns": [
       {
@@ -31,6 +31,9 @@
     ],
     "parameters": {
       "Left": [
+        "Int8",
+        "Int4",
+        "Int4",
         "Int8"
       ]
     },
@@ -42,5 +45,5 @@
       true
     ]
   },
-  "hash": "49c7d966bdd62dcaf05c9a76446f0cf61014e167c3320fba56ba3ac51e8b4b66"
+  "hash": "080828169ddd954c75001fe0bfb6463b267be73ff8d526586b2208f69e19e705"
 }

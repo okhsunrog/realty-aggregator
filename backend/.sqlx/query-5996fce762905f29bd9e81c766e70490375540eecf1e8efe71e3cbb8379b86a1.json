@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE images\n            SET ai_image_type = $2,\n                ai_room = $3,\n                ai_condition = $4,\n                ai_confidence = $5,\n                ai_issues = $6,\n                ai_description = $7,\n                ai_model = $8,\n                ai_analyzed_at = NOW(), ai_retry_at = NULL, ai_last_error = NULL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "TextArray",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5996fce762905f29bd9e81c766e70490375540eecf1e8efe71e3cbb8379b86a1"
+}

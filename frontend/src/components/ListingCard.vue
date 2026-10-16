@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { NCard, NTag, NSpace, NProgress, NEllipsis } from 'naive-ui'
 import type { Listing } from '@/api'
-import { getImageUrl } from '@/api'
+import { sourceStatusLabel, getImageUrl } from '@/api'
 import { computed } from 'vue'
 
 const props = defineProps<{
   listing: Listing
-  firstImageKey?: string | null
+  firstImageId?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -28,21 +28,19 @@ const conditionColor = computed(() => {
   if (c >= 75) return 'success'
   if (c >= 50) return 'info'
   if (c >= 25) return 'warning'
-  return 'error'
+  return 'error'  // Включая 0
 })
 
-const conditionText = computed(() => {
+// Минимум 5% для отображения красной полоски при 0
+const conditionPercentage = computed(() => {
   const c = props.listing.analysis_condition
-  if (c === null) return null
-  if (c >= 75) return 'Отличное'
-  if (c >= 50) return 'Хорошее'
-  if (c >= 25) return 'Требует ремонта'
-  return 'Черновая отделка'
+  if (c === null) return 0
+  return c === 0 ? 5 : c
 })
 
 const imageUrl = computed(() => {
-  if (props.firstImageKey) {
-    return getImageUrl(props.firstImageKey)
+  if (props.firstImageId) {
+    return getImageUrl(props.firstImageId)
   }
   return null
 })
@@ -53,7 +51,7 @@ const imageUrl = computed(() => {
     <template #cover>
       <div class="card-cover">
         <img v-if="imageUrl" :src="imageUrl" :alt="listing.title || 'Listing'" />
-        <div v-else class="no-image">📷 Нет фото</div>
+        <div v-else class="no-image">Фото пока недоступно</div>
       </div>
     </template>
 
@@ -68,6 +66,10 @@ const imageUrl = computed(() => {
     </template>
 
     <n-space vertical size="small">
+      <n-tag size="small" :type="!listing.is_active ? 'error' : listing.source_check_status === 'active' ? 'success' : 'warning'">
+        {{ sourceStatusLabel(listing) }}
+      </n-tag>
+      <div v-if="listing.source_checked_at" style="font-size: 0.8em; color: #888">Проверка: {{ new Date(listing.source_checked_at).toLocaleString('ru-RU') }}</div>
       <div class="info-row">
         <span v-if="listing.rooms">{{ listing.rooms }} комн.</span>
         <span v-if="listing.area">{{ listing.area }} м²</span>
@@ -76,22 +78,26 @@ const imageUrl = computed(() => {
         </span>
       </div>
 
-      <n-ellipsis v-if="listing.address" :line-clamp="1" style="color: #888; font-size: 0.9em;">
-        {{ listing.address }}
+      <n-ellipsis v-if="listing.address || listing.city" :line-clamp="1" style="color: #888; font-size: 0.9em;">
+        {{ [listing.city, listing.address].filter(Boolean).join(', ') }}
       </n-ellipsis>
 
-      <n-space v-if="listing.analysis_condition !== null" align="center" size="small">
+      <div v-if="listing.analysis_condition !== null" class="condition-row">
+        <span>Состояние: {{ listing.analysis_condition }}/100</span>
         <n-progress
           type="line"
-          :percentage="listing.analysis_condition"
+          :percentage="conditionPercentage"
           :status="conditionColor"
           :show-indicator="false"
           style="width: 80px"
         />
-        <n-tag :type="conditionColor" size="small">{{ conditionText }}</n-tag>
-      </n-space>
+      </div>
 
-      <n-space v-if="listing.analysis_red_flags?.length" wrap>
+      <n-tag v-if="listing.analysis_condition === null" size="small">
+        {{ listing.analysis_analyzed_at ? 'Недостаточно данных' : 'Ожидает анализа' }}
+      </n-tag>
+      <n-space v-if="listing.analysis_is_shell || listing.analysis_red_flags?.length" wrap size="small">
+        <n-tag v-if="listing.analysis_is_shell" type="warning" size="small">Без отделки</n-tag>
         <n-tag v-for="flag in listing.analysis_red_flags" :key="flag" type="error" size="small">
           {{ flag }}
         </n-tag>
@@ -133,5 +139,13 @@ const imageUrl = computed(() => {
   gap: 12px;
   color: #aaa;
   font-size: 0.9em;
+}
+
+.condition-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #aaa;
+  font-size: 0.85em;
 }
 </style>

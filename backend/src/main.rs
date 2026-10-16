@@ -2,26 +2,19 @@ use std::sync::Arc;
 
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
-use tokio_cron_scheduler::{Job, JobScheduler};
 use tokio_shutdown::Shutdown;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-mod ads_api;
-mod config;
-mod db;
-mod jobs;
-mod routes;
-mod storage;
-mod vision;
-
-use ads_api::AdsApiClient;
-use config::Config;
-use db::Repository;
-use jobs::Collector;
-use routes::{AppState, create_router};
-use storage::StorageClient;
-use vision::{ImageAnalyzer, ListingAnalyzer};
+use backend::{
+    ads_api::AdsApiClient,
+    config::Config,
+    db::Repository,
+    jobs::Collector,
+    routes::{AppState, create_router},
+    storage::StorageClient,
+    vision::{ImageAnalyzer, ListingAnalyzer},
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Arc::new(Config::load_default().expect("Failed to load config.toml"));
     tracing::info!("Configuration loaded from config.toml");
+    tracing::info!(interface = ?std::env::var("SOURCE_NETWORK_INTERFACE").ok(), "Source network configuration");
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://realty:realty_dev_password@localhost:5432/realty".into());
@@ -60,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("ADS_API_USER or ADS_API_TOKEN not set. Collection will fail.");
     }
 
-    let api_client = Arc::new(AdsApiClient::new(ads_api_user, ads_api_token));
+    let api_client = Arc::new(
+        AdsApiClient::new(ads_api_user, ads_api_token)
+            .with_request_delay(config.api.request_delay_seconds),
+    );
     let repository = Arc::new(Repository::new(pool));
 
     // Initialize Storage Client (optional)
@@ -121,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut collector = Collector::new(api_client.clone(), repository.clone(), config.clone());
-    if let Some(storage) = storage_client {
+    if let Some(storage) = storage_client.clone() {
         collector = collector.with_storage_client(storage);
     }
     if let Some(analyzer) = image_analyzer {
@@ -135,95 +132,82 @@ async fn main() -> anyhow::Result<()> {
     }
     let collector = Arc::new(collector);
 
-    // Setup scheduler
-    let mut scheduler = JobScheduler::new().await?;
-
-    // Collection job - run at configured interval
-    let collect_interval = config.api.collect_interval_minutes;
-    let collector_for_job = collector.clone();
-
-    // Build cron expression for the collection interval
-    // For intervals like 60 minutes, run every hour at minute 0
-    let collection_cron = if collect_interval >= 60 {
-        "0 0 * * * *".to_string() // Every hour
-    } else {
-        format!("0 */{} * * * *", collect_interval) // Every N minutes
-    };
-
-    let collection_job = Job::new_async(collection_cron.as_str(), move |_uuid, _l| {
-        let collector = collector_for_job.clone();
-        Box::pin(async move {
-            tracing::info!("Starting scheduled collection");
-            match collector.run_collection().await {
-                Ok(result) => {
-                    tracing::info!("Scheduled collection completed: {:?}", result);
-                }
-                Err(e) => {
-                    tracing::error!("Scheduled collection failed: {}", e);
+    let mut scheduled_tasks = Vec::new();
+    let scheduled_collector = collector.clone();
+    let period = std::time::Duration::from_secs(config.api.collect_interval_minutes as u64 * 60);
+    scheduled_tasks.push(tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = scheduled_collector.run_collection().await {
+                tracing::warn!(%error, "Scheduled collection failed");
+            }
+        }
+    }));
+    if config.api.sync.enabled {
+        let scheduled_collector = collector.clone();
+        let hours = config.api.sync.interval_hours;
+        let period = std::time::Duration::from_secs(hours as u64 * 3600);
+        scheduled_tasks.push(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) = scheduled_collector.sync_actuality(hours).await {
+                    tracing::warn!(%error, "Scheduled actuality sync failed");
                 }
             }
-        })
-    })?;
-
-    scheduler.add(collection_job).await?;
-    tracing::info!(
-        "Collection job scheduled with cron: {} (every {} minutes)",
-        collection_cron,
-        collect_interval
-    );
-
-    // Actuality sync job - run daily if enabled
-    if config.api.sync.enabled {
-        let sync_interval_hours = config.api.sync.interval_hours;
-        let collector_for_sync = collector.clone();
-
-        // Run daily at 3:00 AM
-        let sync_job = Job::new_async("0 0 3 * * *", move |_uuid, _l| {
-            let collector = collector_for_sync.clone();
-            let hours = sync_interval_hours;
-            Box::pin(async move {
-                tracing::info!("Starting scheduled actuality sync");
-                match collector.sync_actuality(hours).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            "Actuality sync completed: {} checked, {} marked inactive",
-                            result.total_checked,
-                            result.marked_inactive
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Actuality sync failed: {}", e);
-                    }
-                }
-            })
-        })?;
-
-        scheduler.add(sync_job).await?;
-        tracing::info!(
-            "Actuality sync job scheduled to run daily at 3:00 AM (checking last {} hours)",
-            sync_interval_hours
-        );
+        }));
     }
 
-    scheduler.start().await?;
-    tracing::info!("Scheduler started");
+    if config.actuality.enabled {
+        let source_collector = collector.clone();
+        let period = std::time::Duration::from_secs(config.actuality.interval_minutes as u64 * 60);
+        scheduled_tasks.push(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) = source_collector.run_source_checks(&[]).await {
+                    tracing::warn!(%error, "Source checks failed");
+                }
+            }
+        }));
+    }
 
     // Setup routes
     let state = AppState {
         repository,
         collector,
+        storage: storage_client,
+        config: config.clone(),
     };
 
+    let origins: Vec<axum::http::HeaderValue> = config
+        .server
+        .allowed_origins
+        .iter()
+        .map(|origin| origin.parse())
+        .collect::<Result<_, _>>()?;
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(origins)
         .allow_methods(Any)
         .allow_headers(Any);
 
     let app = create_router(state)
+        .layer(axum::middleware::from_fn_with_state(
+            config.server.allowed_origins.clone(),
+            check_origin,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr: SocketAddr = std::env::var("SERVER_BIND")
+        .unwrap_or_else(|_| config.server.bind.clone())
+        .parse()?;
     tracing::info!("Server listening on {}", addr);
 
     // Setup graceful shutdown
@@ -238,10 +222,37 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    // Shutdown scheduler
-    tracing::info!("Shutting down scheduler...");
-    scheduler.shutdown().await?;
+    // Stop scheduled tasks
+    tracing::info!("Stopping scheduled tasks...");
+    for task in scheduled_tasks {
+        task.abort();
+    }
 
     tracing::info!("Graceful shutdown complete");
     Ok(())
+}
+
+async fn check_origin(
+    axum::extract::State(allowed): axum::extract::State<Vec<String>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let sensitive = !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) || request.uri().path() == "/api/ws/status";
+    if sensitive
+        && request
+            .headers()
+            .get(axum::http::header::ORIGIN)
+            .is_some_and(|origin| {
+                origin.to_str().map_or(true, |origin| {
+                    !allowed.iter().any(|allowed| allowed == origin)
+                })
+            })
+    {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
 }

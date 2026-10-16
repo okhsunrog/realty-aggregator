@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        Path, Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -11,17 +14,19 @@ use futures::{SinkExt, StreamExt};
 use serde_json::json;
 
 use crate::db::{NewCollectionConfig, Repository};
-use crate::jobs::Collector;
+use crate::jobs::{Collector, Job};
+use crate::storage::StorageClient;
 
 #[derive(Clone)]
 pub struct AppState {
     pub repository: Arc<Repository>,
     pub collector: Arc<Collector>,
+    pub storage: Option<Arc<StorageClient>>,
+    pub config: Arc<crate::config::Config>,
 }
 
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(root))
+    let app = Router::new()
         .route("/health", get(health))
         .route("/api/collect", post(trigger_collection))
         .route("/api/collect/status", get(collection_status))
@@ -32,21 +37,51 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/configs/{id}", delete(delete_config))
         .route("/api/configs/{id}/toggle", post(toggle_config))
         .route("/api/stats", get(get_stats))
+        .route("/api/settings", get(get_public_settings))
         // Listings endpoints
         .route("/api/listings", get(get_listings))
+        .route("/api/images/{id}/content", get(image_content))
+        .route(
+            "/api/listings/{id}/review",
+            get(get_review).put(save_review),
+        )
+        .route("/api/listings/{id}/price-history", get(price_history))
         .route("/api/listings/{id}", get(get_listing))
         .route("/api/listings/{id}/images", get(get_listing_images))
-        .route("/api/listings/{id}/mark-inactive", post(mark_listing_inactive))
+        .route(
+            "/api/listings/{id}/mark-inactive",
+            post(mark_listing_inactive),
+        )
         // Analysis endpoints
         .route("/api/analyze/images", post(trigger_image_analysis))
         .route("/api/analyze/listings", post(trigger_listing_analysis))
         // Single listing analysis endpoints
-        .route("/api/listings/{id}/analyze/images", post(analyze_listing_images))
+        .route(
+            "/api/listings/{id}/analyze/images",
+            post(analyze_listing_images),
+        )
         .route("/api/listings/{id}/analyze", post(analyze_single_listing))
         // Actuality sync
         .route("/api/sync/actuality", post(trigger_actuality_sync))
         .route("/api/check-actuality", post(check_actuality_by_ids))
-        .with_state(state)
+        .route("/api/check-sources", post(check_sources))
+        .route("/api/listings/{id}/check-source", post(check_single_source));
+    let app = if let Some(directory) = state
+        .config
+        .server
+        .frontend_dir
+        .as_ref()
+        .filter(|path| path.join("index.html").is_file())
+    {
+        app.fallback_service(
+            tower_http::services::ServeDir::new(directory).not_found_service(
+                tower_http::services::ServeFile::new(directory.join("index.html")),
+            ),
+        )
+    } else {
+        app.route("/", get(root))
+    };
+    app.with_state(state)
 }
 
 async fn root() -> &'static str {
@@ -58,29 +93,7 @@ async fn health() -> &'static str {
 }
 
 async fn trigger_collection(State(state): State<AppState>) -> impl IntoResponse {
-    if state.collector.is_running().await {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "Collection already in progress"})),
-        );
-    }
-
-    let collector = state.collector.clone();
-    tokio::spawn(async move {
-        match collector.run_collection().await {
-            Ok(result) => {
-                tracing::info!("Collection completed: {:?}", result);
-            }
-            Err(e) => {
-                tracing::error!("Collection failed: {}", e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Collection started"})),
-    )
+    start_job(state, Job::Collect)
 }
 
 async fn collection_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -93,10 +106,7 @@ async fn get_job_status(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!(status))
 }
 
-async fn ws_status(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_status(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws_status(socket, state))
 }
 
@@ -125,7 +135,14 @@ async fn handle_ws_status(socket: WebSocket, state: AppState) {
 
     // Send status updates from broadcast channel
     let mut send_task = tokio::spawn(async move {
-        while let Ok(status) = rx.recv().await {
+        loop {
+            let status = match rx.recv().await {
+                Ok(status) => status,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    state.collector.get_status().await
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             if let Ok(json) = serde_json::to_string(&status) {
                 if sender.send(Message::Text(json.into())).await.is_err() {
                     break;
@@ -210,26 +227,28 @@ async fn toggle_config(State(state): State<AppState>, Path(id): Path<i32>) -> im
 }
 
 async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
-    let total = state.repository.get_listings_count().await.unwrap_or(0);
-    let active = state
-        .repository
-        .get_active_listings_count()
-        .await
-        .unwrap_or(0);
-
-    let images_stats = state.repository.get_images_stats().await.ok();
-    let analysis_stats = state.repository.get_analysis_stats().await.ok();
-
-    let configs = state.repository.get_all_configs().await.unwrap_or_default();
-
-    Json(json!({
-        "total_listings": total,
-        "active_listings": active,
-        "images": images_stats,
-        "analysis": analysis_stats,
-        "configs_count": configs.len(),
-        "active_configs_count": configs.iter().filter(|c| c.is_active.unwrap_or(false)).count()
-    }))
+    match tokio::try_join!(
+        state.repository.get_listings_count(),
+        state.repository.get_active_listings_count(),
+        state.repository.get_images_stats(),
+        state.repository.get_analysis_stats(),
+        state.repository.get_all_configs()
+    ) {
+        Ok((total, active, images, analysis, configs)) => (
+            StatusCode::OK,
+            Json(json!({
+                "total_listings": total, "active_listings": active, "images": images, "analysis": analysis,
+                "configs_count": configs.len(), "active_configs_count": configs.iter().filter(|c| c.is_active.unwrap_or(false)).count()
+            })),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "Unable to read stats");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Unable to read stats"})),
+            )
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -239,30 +258,18 @@ struct AnalyzeAllParams {
 }
 
 fn default_concurrency() -> usize {
-    10
+    3
 }
 
 async fn trigger_image_analysis(
     State(state): State<AppState>,
     Json(params): Json<Option<AnalyzeAllParams>>,
 ) -> impl IntoResponse {
-    let concurrency = params.map(|p| p.concurrency).unwrap_or(10);
-
-    let collector = state.collector.clone();
-    tokio::spawn(async move {
-        match collector.run_image_analysis_all(concurrency).await {
-            Ok(count) => {
-                tracing::info!("Image analysis completed: {} images analyzed", count);
-            }
-            Err(e) => {
-                tracing::error!("Image analysis failed: {}", e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Image analysis started", "concurrency": concurrency})),
+    start_job(
+        state,
+        Job::Images {
+            concurrency: params.map(|p| p.concurrency).unwrap_or(3),
+        },
     )
 }
 
@@ -270,31 +277,21 @@ async fn trigger_listing_analysis(
     State(state): State<AppState>,
     Json(params): Json<Option<AnalyzeAllParams>>,
 ) -> impl IntoResponse {
-    let concurrency = params.map(|p| p.concurrency).unwrap_or(10);
-
-    let collector = state.collector.clone();
-    tokio::spawn(async move {
-        match collector.run_listing_analysis_all(concurrency).await {
-            Ok(count) => {
-                tracing::info!(
-                    "Listing analysis completed: {} listings analyzed",
-                    count
-                );
-            }
-            Err(e) => {
-                tracing::error!("Listing analysis failed: {}", e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Listing analysis started", "concurrency": concurrency})),
+    start_job(
+        state,
+        Job::Listings {
+            concurrency: params.map(|p| p.concurrency).unwrap_or(3),
+        },
     )
 }
 
 #[derive(serde::Deserialize)]
 struct ListingsQuery {
+    min_area: Option<f64>,
+    move_in_ready: Option<bool>,
+    favorites_only: Option<bool>,
+    hide_rejected: Option<bool>,
+    verified_only: Option<bool>,
     page: Option<i64>,
     per_page: Option<i64>,
     min_price: Option<i64>,
@@ -304,8 +301,8 @@ struct ListingsQuery {
     hide_shell: Option<bool>,
     active_only: Option<bool>,
     // New filters
-    property_type: Option<String>,  // "Новостройка", "Вторичка", or empty for all
-    is_shell: Option<bool>,         // true/false, or None for all
+    property_type: Option<String>, // "Новостройка", "Вторичка", or empty for all
+    is_shell: Option<bool>,        // true/false, or None for all
     min_condition: Option<i32>,
     max_condition: Option<i32>,
 }
@@ -314,7 +311,7 @@ async fn get_listings(
     State(state): State<AppState>,
     Query(params): Query<ListingsQuery>,
 ) -> impl IntoResponse {
-    let page = params.page.unwrap_or(1).max(1);
+    let page = params.page.unwrap_or(1).clamp(1, 1_000_000);
     let per_page = params.per_page.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * per_page;
 
@@ -323,16 +320,26 @@ async fn get_listings(
         .get_listings_paginated(
             offset,
             per_page,
-            params.min_price,
-            params.max_price,
-            params.rooms,
-            params.analyzed_only.unwrap_or(false),
-            params.hide_shell.unwrap_or(false),
-            params.active_only.unwrap_or(true),
-            params.property_type,
-            params.is_shell,
-            params.min_condition,
-            params.max_condition,
+            crate::db::repository::ListingsFilter {
+                min_price: params.min_price,
+                max_price: params.max_price,
+                rooms: params.rooms,
+                analyzed_only: params.analyzed_only.unwrap_or(false),
+                hide_shell: params.hide_shell.unwrap_or(false) && params.is_shell != Some(true),
+                active_only: params.active_only.unwrap_or(true),
+                property_type: params.property_type,
+                is_shell: params.is_shell,
+                min_condition: params.min_condition,
+                max_condition: params.max_condition,
+                min_area: params.min_area,
+                move_in_ready: params.move_in_ready,
+                favorites_only: params.favorites_only.unwrap_or(false),
+                hide_rejected: params.hide_rejected.unwrap_or(false),
+                verified_after: params.verified_only.unwrap_or(false).then(|| {
+                    chrono::Utc::now()
+                        - chrono::Duration::hours(state.config.actuality.recheck_hours as i64)
+                }),
+            },
         )
         .await
     {
@@ -352,10 +359,7 @@ async fn get_listings(
     }
 }
 
-async fn get_listing(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
+async fn get_listing(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
     match state.repository.get_listing_by_id(id).await {
         Ok(Some(listing)) => (StatusCode::OK, Json(json!(listing))),
         Ok(None) => (
@@ -386,22 +390,7 @@ async fn analyze_listing_images(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let collector = state.collector.clone();
-    tokio::spawn(async move {
-        match collector.analyze_listing_images(id).await {
-            Ok(count) => {
-                tracing::info!("Analyzed {} images for listing {}", count, id);
-            }
-            Err(e) => {
-                tracing::error!("Failed to analyze images for listing {}: {}", id, e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Image analysis started", "listing_id": id})),
-    )
+    start_job(state, Job::ListingImages(id))
 }
 
 #[derive(serde::Deserialize)]
@@ -414,28 +403,12 @@ async fn analyze_single_listing(
     Path(id): Path<i64>,
     Json(params): Json<Option<AnalyzeListingParams>>,
 ) -> impl IntoResponse {
-    let collector = state.collector.clone();
-    let model = params.and_then(|p| p.model);
-    let model_for_response = model.clone();
-
-    tokio::spawn(async move {
-        match collector.analyze_single_listing_with_model(id, model).await {
-            Ok(_) => {
-                tracing::info!("Analyzed listing {}", id);
-            }
-            Err(e) => {
-                tracing::error!("Failed to analyze listing {}: {}", id, e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "message": "Listing analysis started",
-            "listing_id": id,
-            "model": model_for_response
-        })),
+    start_job(
+        state,
+        Job::Listing {
+            id,
+            model: params.and_then(|p| p.model),
+        },
     )
 }
 
@@ -448,27 +421,11 @@ async fn trigger_actuality_sync(
     State(state): State<AppState>,
     Query(params): Query<SyncQuery>,
 ) -> impl IntoResponse {
-    let hours = params.hours.unwrap_or(24 * 7); // Default: last 7 days
-    let collector = state.collector.clone();
-
-    tokio::spawn(async move {
-        match collector.sync_actuality(hours).await {
-            Ok(result) => {
-                tracing::info!(
-                    "Actuality sync completed: {} checked, {} marked inactive",
-                    result.total_checked,
-                    result.marked_inactive
-                );
-            }
-            Err(e) => {
-                tracing::error!("Actuality sync failed: {}", e);
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"message": "Actuality sync started", "hours": hours})),
+    start_job(
+        state,
+        Job::Sync {
+            hours: params.hours.unwrap_or(168),
+        },
     )
 }
 
@@ -481,6 +438,12 @@ async fn check_actuality_by_ids(
     State(state): State<AppState>,
     Json(params): Json<CheckActualityParams>,
 ) -> impl IntoResponse {
+    if params.ids.is_empty() || params.ids.len() > 250 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Expected 1..250 IDs"})),
+        );
+    }
     match state.collector.check_actuality_by_ids(&params.ids).await {
         Ok(results) => (
             StatusCode::OK,
@@ -490,10 +453,7 @@ async fn check_actuality_by_ids(
                 "results": results
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -515,4 +475,112 @@ async fn mark_listing_inactive(
             Json(json!({"error": e.to_string()})),
         ),
     }
+}
+
+fn start_job(state: AppState, job: Job) -> (StatusCode, Json<serde_json::Value>) {
+    match state.collector.start(job) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"message": "Задача запущена"})),
+        ),
+        Err(error) => (
+            if error == "Job already in progress" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            Json(json!({"error": error})),
+        ),
+    }
+}
+async fn image_content(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    let Some(storage) = &state.storage else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match state.repository.get_image_by_id(id).await {
+        Ok(Some(key)) => match storage.get_image_by_key(&key).await {
+            Ok(bytes) => (
+                [
+                    (axum::http::header::CONTENT_TYPE, "image/jpeg"),
+                    (axum::http::header::CACHE_CONTROL, "private, no-cache"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+        },
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn get_review(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    match state.repository.get_review(id).await {
+        Ok(value) => (StatusCode::OK, Json(json!(value))),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"Database error"})),
+        ),
+    }
+}
+async fn save_review(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(review): Json<crate::db::models::ListingReview>,
+) -> impl IntoResponse {
+    if ![
+        "new",
+        "contact",
+        "visit",
+        "documents",
+        "approved",
+        "rejected",
+    ]
+    .contains(&review.stage.as_str())
+        || review.notes.len() > 20000
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Invalid stage or notes too long"})),
+        );
+    }
+    match state.repository.save_review(id, &review).await {
+        Ok(()) => (StatusCode::OK, Json(json!(review))),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"Unable to save review"})),
+        ),
+    }
+}
+async fn price_history(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    match state.repository.get_price_history(id).await {
+        Ok(value) => (StatusCode::OK, Json(json!(value))),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"Database error"})),
+        ),
+    }
+}
+
+async fn check_sources(
+    State(state): State<AppState>,
+    Json(params): Json<CheckActualityParams>,
+) -> impl IntoResponse {
+    start_job(state, Job::CheckSources { ids: params.ids })
+}
+
+async fn check_single_source(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    start_job(state, Job::CheckSources { ids: vec![id] })
+}
+
+async fn get_public_settings(State(state): State<AppState>) -> impl IntoResponse {
+    Json(
+        json!({"models": state.config.vision.allowed_models, "default_model": state.config.vision.listing_model,
+        "source_check_ttl_hours": state.config.actuality.recheck_hours}),
+    )
 }

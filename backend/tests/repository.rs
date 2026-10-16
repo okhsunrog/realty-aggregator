@@ -29,7 +29,13 @@ async fn listing_and_image_analysis_round_trip(pool: PgPool) -> anyhow::Result<(
             None,
         )
         .await?;
-    assert_eq!(repository.get_images_for_ai_analysis(10).await?.len(), 1);
+    assert_eq!(
+        repository
+            .get_images_for_ai_analysis(10, 3, 20, None)
+            .await?
+            .len(),
+        1
+    );
     repository
         .save_image_analysis(
             images[0].id,
@@ -53,9 +59,9 @@ async fn listing_and_image_analysis_round_trip(pool: PgPool) -> anyhow::Result<(
         .save_listing_analysis(
             1,
             &ListingAnalysisResult {
-                overall_condition: 75,
-                is_shell: false,
-                move_in_ready: true,
+                overall_condition: Some(75),
+                is_shell: Some(false),
+                move_in_ready: Some(true),
                 red_flags: vec![],
                 summary: "Можно заселяться".to_owned(),
             },
@@ -71,7 +77,14 @@ async fn listing_and_image_analysis_round_trip(pool: PgPool) -> anyhow::Result<(
     assert_eq!(saved.params, None);
     let (listings, total) = repository
         .get_listings_paginated(
-            0, 20, None, None, None, true, true, true, None, None, None, None,
+            0,
+            20,
+            backend::db::repository::ListingsFilter {
+                analyzed_only: true,
+                hide_shell: true,
+                active_only: true,
+                ..Default::default()
+            },
         )
         .await?;
     assert_eq!(total, 1);

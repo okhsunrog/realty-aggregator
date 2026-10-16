@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET source_check_status = $2, source_checked_at = $3,\n            source_check_http_status = $4, source_check_reason = $5,\n            is_active = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $7 ELSE is_active END,\n            actuality_checked_at = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $3 ELSE actuality_checked_at END,\n            actuality_origin = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN 'source_page' ELSE actuality_origin END\n            WHERE id = $1 AND (source_time IS NULL OR source_time <= $3)\n                AND (source_checked_at IS NULL OR source_checked_at <= $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int4",
+        "Text",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03658d63ff6a64b5872c4cee8625d2f34e2565c74fa37bd303ce9423a86749e1"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", download_attempts\n            FROM images\n            WHERE status = 'pending'\n               OR (status = 'not_found' AND download_attempts < 2)\n            ORDER BY listing_id, image_index\n            LIMIT $1\n            ",
+  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", download_attempts\n            FROM images\n            WHERE (status = 'pending' OR (status = 'not_found' AND download_attempts < 2))\n                AND image_index < $2 AND EXISTS (SELECT 1 FROM listings l WHERE l.id = images.listing_id AND l.is_active = true)\n            ORDER BY image_index, (SELECT l.fetched_at FROM listings l WHERE l.id = images.listing_id) DESC, listing_id\n            LIMIT $1\n            ",
   "describe": {
     "columns": [
       {
@@ -49,7 +49,8 @@
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Int8",
+        "Int4"
       ]
     },
     "nullable": [
@@ -61,5 +62,5 @@
       false
     ]
   },
-  "hash": "0b2bfec56da2479ad86d215685084431327a6ef2cc8ce35b91157f77fee64af3"
+  "hash": "48decb8a38bd84557884a0a1799975acf4cd7ab455f7148068d950c0905cea15"
 }

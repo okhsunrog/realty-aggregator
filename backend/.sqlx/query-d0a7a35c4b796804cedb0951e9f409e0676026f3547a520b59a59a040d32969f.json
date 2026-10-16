@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, last_listing_id, last_collection_at FROM collection_state WHERE id = 1",
+  "query": "SELECT id, last_listing_id, last_collection_at, query_fingerprint, last_sync_at FROM collection_state WHERE id = 1",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,16 @@
         "ordinal": 2,
         "name": "last_collection_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "query_fingerprint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_sync_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -25,8 +35,10 @@
     "nullable": [
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "2201ab8bf909ccf3b4d9f809eea827d832475793e08248e0eed9b1c75d3fb127"
+  "hash": "d0a7a35c4b796804cedb0951e9f409e0676026f3547a520b59a59a040d32969f"
 }

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET is_active = $2, actuality_checked_at = $3, actuality_origin = 'check_feed'\n            WHERE id = $1 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) AND (source_time IS NULL OR source_time <= $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c72ea142a68ca29232a979866a052a7ad49c74e398a8fbf0472625136436eed3"
+}

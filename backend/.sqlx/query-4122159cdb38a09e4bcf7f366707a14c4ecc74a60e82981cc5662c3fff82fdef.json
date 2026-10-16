@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE listings\n            SET analysis_condition = $2,\n                analysis_is_shell = $3,\n                analysis_move_in_ready = $4,\n                analysis_red_flags = $5,\n                analysis_summary = $6,\n                analysis_model = $7,\n                analyzed_at = NOW(), analysis_retry_at = NULL, analysis_last_error = NULL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Bool",
+        "Bool",
+        "TextArray",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4122159cdb38a09e4bcf7f366707a14c4ecc74a60e82981cc5662c3fff82fdef"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET analysis_condition = NULL, analysis_is_shell = NULL,\n                analysis_move_in_ready = NULL, analysis_red_flags = NULL, analysis_summary = NULL,\n                analysis_model = NULL, analyzed_at = NULL, analysis_attempts = 0,\n                analysis_retry_at = NULL, analysis_last_error = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd6db167b9a8d37a4e2b8710a8c8d0c926a1932518b89ee6684233eb5fb7d9ab"
+}

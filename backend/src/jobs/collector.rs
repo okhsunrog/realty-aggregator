@@ -1,21 +1,23 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
+use crate::{
+    ads_api::{AdsApiClient, models::ListingsQuery},
+    config::Config,
+    db::{DbListing, ImageAnalysisResult, ImageStatus, ListingAnalysisResult, Repository},
+    storage::StorageClient,
+    vision::{ImageAnalyzer, ListingAnalyzer},
+};
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
-use futures::{stream, StreamExt};
+use futures::{FutureExt, StreamExt, stream};
 use serde::Serialize;
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::sync::{RwLock, broadcast};
-use tracing::{debug, error, info, warn};
 
-use crate::ads_api::AdsApiClient;
-use crate::ads_api::models::ListingsQuery;
-use crate::config::Config;
-use crate::db::{DbListing, ImageStatus, Repository};
-use crate::storage::StorageClient;
-use crate::vision::{ImageAnalyzer, ListingAnalyzer};
-
-/// Текущая фаза работы
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobPhase {
@@ -26,23 +28,19 @@ pub enum JobPhase {
     AnalyzingListings,
     SyncingActuality,
 }
-
-/// Прогресс текущей задачи
 #[derive(Debug, Clone, Serialize)]
 pub struct JobProgress {
     pub processed: usize,
     pub total: Option<usize>,
 }
-
-/// Полный статус работы бэкенда
 #[derive(Debug, Clone, Serialize)]
 pub struct JobStatus {
     pub phase: JobPhase,
     pub progress: Option<JobProgress>,
     pub started_at: Option<DateTime<Utc>>,
     pub message: Option<String>,
+    pub last_error: Option<String>,
 }
-
 impl Default for JobStatus {
     fn default() -> Self {
         Self {
@@ -50,1108 +48,788 @@ impl Default for JobStatus {
             progress: None,
             started_at: None,
             message: None,
+            last_error: None,
         }
     }
 }
 
+pub enum Job {
+    Collect,
+    CheckSources { ids: Vec<i64> },
+    Images { concurrency: usize },
+    Listings { concurrency: usize },
+    ListingImages(i64),
+    Listing { id: i64, model: Option<String> },
+    Sync { hours: u32 },
+}
+impl Job {
+    fn phase(&self) -> JobPhase {
+        match self {
+            Self::Collect => JobPhase::CollectingListings,
+            Self::Images { .. } | Self::ListingImages(_) => JobPhase::AnalyzingImages,
+            Self::Listings { .. } | Self::Listing { .. } => JobPhase::AnalyzingListings,
+            Self::Sync { .. } | Self::CheckSources { .. } => JobPhase::SyncingActuality,
+        }
+    }
+}
+struct Permit(Arc<AtomicBool>);
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 pub struct Collector {
+    source_checker: crate::actuality::SourceChecker,
     api_client: Arc<AdsApiClient>,
     repository: Arc<Repository>,
+    config: Arc<Config>,
     image_analyzer: Option<Arc<ImageAnalyzer>>,
     listing_analyzer: Option<Arc<ListingAnalyzer>>,
     storage_client: Option<Arc<StorageClient>>,
-    config: Arc<Config>,
-    status: Arc<RwLock<JobStatus>>,
-    status_tx: broadcast::Sender<JobStatus>,
     vision_api_key: Option<String>,
+    running: Arc<AtomicBool>,
+    status: RwLock<JobStatus>,
+    status_tx: broadcast::Sender<JobStatus>,
 }
-
 impl Collector {
     pub fn new(
         api_client: Arc<AdsApiClient>,
         repository: Arc<Repository>,
         config: Arc<Config>,
     ) -> Self {
-        let (status_tx, _) = broadcast::channel(16);
+        let (status_tx, _) = broadcast::channel(64);
         Self {
+            source_checker: crate::actuality::SourceChecker::new(
+                config.actuality.request_delay_seconds,
+            )
+            .expect("Source HTTP client"),
             api_client,
             repository,
+            config,
             image_analyzer: None,
             listing_analyzer: None,
             storage_client: None,
-            config,
-            status: Arc::new(RwLock::new(JobStatus::default())),
-            status_tx,
             vision_api_key: None,
+            running: Arc::new(AtomicBool::new(false)),
+            status: RwLock::new(JobStatus::default()),
+            status_tx,
         }
     }
-
-    /// Subscribe to status updates via broadcast channel
+    pub fn with_image_analyzer(mut self, v: Arc<ImageAnalyzer>) -> Self {
+        self.image_analyzer = Some(v);
+        self
+    }
+    pub fn with_listing_analyzer(mut self, v: Arc<ListingAnalyzer>) -> Self {
+        self.listing_analyzer = Some(v);
+        self
+    }
+    pub fn with_storage_client(mut self, v: Arc<StorageClient>) -> Self {
+        self.storage_client = Some(v);
+        self
+    }
+    pub fn with_vision_api_key(mut self, v: String) -> Self {
+        self.vision_api_key = Some(v);
+        self
+    }
     pub fn subscribe(&self) -> broadcast::Receiver<JobStatus> {
         self.status_tx.subscribe()
     }
-
-    pub fn with_image_analyzer(mut self, analyzer: Arc<ImageAnalyzer>) -> Self {
-        self.image_analyzer = Some(analyzer);
-        self
-    }
-
-    pub fn with_listing_analyzer(mut self, analyzer: Arc<ListingAnalyzer>) -> Self {
-        self.listing_analyzer = Some(analyzer);
-        self
-    }
-
-    pub fn with_storage_client(mut self, storage: Arc<StorageClient>) -> Self {
-        self.storage_client = Some(storage);
-        self
-    }
-
-    pub fn with_vision_api_key(mut self, api_key: String) -> Self {
-        self.vision_api_key = Some(api_key);
-        self
-    }
-
     pub async fn is_running(&self) -> bool {
-        self.status.read().await.phase != JobPhase::Idle
+        self.running.load(Ordering::Acquire)
     }
-
     pub async fn get_status(&self) -> JobStatus {
         self.status.read().await.clone()
     }
-
-    async fn set_status(&self, phase: JobPhase, message: Option<&str>) {
-        let status_clone = {
-            let mut status = self.status.write().await;
-            if phase == JobPhase::Idle {
-                *status = JobStatus::default();
-            } else {
-                status.phase = phase;
-                status.message = message.map(|s| s.to_string());
-                if status.started_at.is_none() {
-                    status.started_at = Some(Utc::now());
-                }
-            }
-            status.clone()
-        };
-        // Broadcast to WebSocket subscribers (ignore errors if no subscribers)
-        let _ = self.status_tx.send(status_clone);
+    fn reserve(&self) -> Result<Permit, String> {
+        self.running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Job already in progress".to_owned())?;
+        Ok(Permit(self.running.clone()))
     }
-
-    async fn set_progress(&self, processed: usize, total: Option<usize>) {
-        let status_clone = {
-            let mut status = self.status.write().await;
-            status.progress = Some(JobProgress { processed, total });
-            status.clone()
-        };
-        // Broadcast to WebSocket subscribers
-        let _ = self.status_tx.send(status_clone);
+    async fn publish(&self, status: JobStatus) {
+        *self.status.write().await = status.clone();
+        let _ = self.status_tx.send(status);
     }
-
-    pub async fn run_collection(&self) -> Result<CollectionResult, String> {
-        {
-            let status = self.status.read().await;
-            if status.phase != JobPhase::Idle {
-                return Err("Job already in progress".to_string());
-            }
-        }
-
-        self.set_status(JobPhase::CollectingListings, Some("Запуск сбора объявлений")).await;
-
-        let result = self.do_collection().await;
-
-        self.set_status(JobPhase::Idle, None).await;
-
+    async fn phase(&self, phase: JobPhase, message: &str) {
+        self.publish(JobStatus {
+            phase,
+            message: Some(message.to_owned()),
+            started_at: Some(Utc::now()),
+            ..Default::default()
+        })
+        .await;
+    }
+    async fn progress(&self, processed: usize, total: usize) {
+        let mut status = self.get_status().await;
+        status.progress = Some(JobProgress {
+            processed,
+            total: Some(total),
+        });
+        self.publish(status).await;
+    }
+    async fn perform<T>(
+        &self,
+        _permit: Permit,
+        phase: JobPhase,
+        work: impl Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        self.phase(phase, "Выполняется задача").await;
+        let result = std::panic::AssertUnwindSafe(work)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err("Задача была прервана внутренней ошибкой".to_owned()));
+        self.publish(JobStatus {
+            last_error: result.as_ref().err().cloned(),
+            ..Default::default()
+        })
+        .await;
         result
     }
-
-    async fn do_collection(&self) -> Result<CollectionResult, String> {
-        info!("Starting collection job");
-
-        let query_config = &self.config.api.query;
-        let request_delay =
-            std::time::Duration::from_secs(self.config.api.request_delay_seconds as u64);
-        let mut total_fetched = 0;
-        let mut total_saved = 0;
-        let mut errors = Vec::new();
-
-        // Get last collection time for date-based loading
-        let last_collection_at = self
-            .repository
-            .get_collection_state()
-            .await
-            .ok()
-            .and_then(|s| s.last_collection_at);
-
-        // Moscow time is UTC+3, API time is 30 min behind
-        let now_moscow = Utc::now() + Duration::hours(3) - Duration::minutes(30);
-
-        // Determine date range
-        let (date1, is_initial) = match last_collection_at {
-            Some(last) => {
-                // Incremental: from last collection (with 1 hour overlap for safety)
-                let from = last + Duration::hours(3) - Duration::minutes(30) - Duration::hours(1);
-                (from, false)
+    pub fn start(self: Arc<Self>, job: Job) -> Result<(), String> {
+        match &job {
+            Job::CheckSources { ids } if ids.len() > 100 => {
+                return Err("At most 100 source checks per job".to_owned());
             }
-            None => {
-                // Initial load: last N days from config
-                let days = self.config.api.initial_load_days as i64;
-                let from = now_moscow - Duration::days(days);
-                (from, true)
+            Job::Images { concurrency } | Job::Listings { concurrency }
+                if !(1..=16).contains(concurrency) =>
+            {
+                return Err("Concurrency must be between 1 and 16".to_owned());
             }
-        };
-
-        let date1_str = date1.format("%Y-%m-%d %H:%M:%S").to_string();
-        let date2_str = now_moscow.format("%Y-%m-%d %H:%M:%S").to_string();
-
-        info!(
-            "Collecting listings for city: {}, category: {}, date range: {} to {} (initial: {})",
-            query_config.city, query_config.category_id, date1_str, date2_str, is_initial
-        );
-
-        // For date-based collection, we paginate by shrinking the time window
-        let mut current_date2 = now_moscow;
-
-        loop {
-            let batch_date2_str = current_date2.format("%Y-%m-%d %H:%M:%S").to_string();
-
-            match self.collect_by_date(&date1_str, &batch_date2_str).await {
-                Ok((fetched, saved, oldest_time)) => {
-                    total_fetched += fetched;
-                    total_saved += saved;
-                    info!(
-                        "Batch: fetched {}, saved {} (total: {}/{})",
-                        fetched, saved, total_fetched, total_saved
-                    );
-
-                    if fetched < 1000 {
-                        // Got all data in this range
-                        info!("Fetched all available listings in date range");
-                        break;
-                    }
-
-                    // If we got 1000, there might be more - shrink the window
-                    if let Some(oldest) = oldest_time {
-                        // Parse the oldest time and use it as new date2
-                        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(&oldest, "%Y-%m-%d %H:%M:%S") {
-                            current_date2 = chrono::TimeZone::from_utc_datetime(&Utc, &parsed);
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-
-                    tokio::time::sleep(request_delay).await;
-                }
-                Err(e) => {
-                    let error_msg = format!("Error collecting: {}", e);
-                    error!("{}", error_msg);
-                    errors.push(error_msg);
-                    break;
-                }
+            Job::Listing {
+                model: Some(model), ..
+            } if !self.config.vision.allowed_models.contains(model) => {
+                return Err("Model is not allowed by config.toml".to_owned());
             }
+            Job::Sync { hours } if *hours == 0 || *hours > 24 * 365 => {
+                return Err("Invalid sync period".to_owned());
+            }
+            _ => {}
         }
-
-        // Update collection state with current time
-        if let Err(e) = self.repository.update_collection_time().await {
-            warn!("Failed to update collection state: {}", e);
-        }
-
-        info!(
-            "Collection completed. Total fetched: {}, saved: {}",
-            total_fetched, total_saved
-        );
-
-        // Download images for all pending images
-        let mut total_images_downloaded = 0;
-        if let Some(storage) = &self.storage_client {
-            // Get all pending images
-            let images = self.repository
-                .get_images_for_download(10000)
-                .await
-                .unwrap_or_default();
-
-            let total_pending = images.len();
-            if total_pending > 0 {
-                self.set_status(JobPhase::DownloadingImages, Some("Загрузка изображений")).await;
-                self.set_progress(0, Some(total_pending)).await;
-
-                let mut processed = 0;
-                for image in images {
-                    let result = storage
-                        .download_and_store_single(image.listing_id, image.image_index, &image.source_url)
-                        .await;
-
-                    let status = if result.success {
-                        total_images_downloaded += 1;
-                        ImageStatus::Downloaded
-                    } else {
-                        match result.http_status {
-                            Some(404) => ImageStatus::NotFound,
-                            Some(410) => ImageStatus::Gone,
-                            _ => {
-                                if image.download_attempts >= 2 {
-                                    ImageStatus::Failed
-                                } else {
-                                    ImageStatus::Pending
-                                }
-                            }
-                        }
-                    };
-
-                    if let Err(e) = self.repository
-                        .update_image_download(
-                            image.id,
-                            status,
-                            result.s3_key.as_deref(),
-                            result.http_status.map(|s| s as i32),
-                            result.error.as_deref(),
-                        )
-                        .await
-                    {
-                        warn!("Failed to update image {}: {}", image.id, e);
-                    }
-
-                    processed += 1;
-                    self.set_progress(processed, Some(total_pending)).await;
-                }
-                info!("All images downloaded: {}/{}", total_images_downloaded, total_pending);
-            }
-        }
-
-        // Run per-image AI analysis (if auto_analyze enabled)
-        let mut total_images_analyzed = 0;
-        if let (Some(analyzer), Some(storage)) = (&self.image_analyzer, &self.storage_client) {
-            if self.config.vision.auto_analyze {
-                // Get all pending images
-                let images = self.repository
-                    .get_images_for_ai_analysis(10000)
-                    .await
-                    .unwrap_or_default();
-
-                let total_pending = images.len();
-                if total_pending > 0 {
-                    self.set_status(JobPhase::AnalyzingImages, Some("AI анализ изображений")).await;
-                    self.set_progress(0, Some(total_pending)).await;
-
-                    for image in images {
-                        let s3_key = match &image.s3_key {
-                            Some(k) => k,
-                            None => continue,
-                        };
-
-                        let image_bytes = match storage.get_image_by_key(s3_key).await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!("Failed to get image {} from S3: {}", image.id, e);
-                                let _ = self.repository.mark_image_s3_missing(image.id).await;
-                                continue;
-                            }
-                        };
-
-                        let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-                        match analyzer.analyze_base64(&image_base64).await {
-                            Ok(analysis) => {
-                                if let Err(e) = self.repository
-                                    .save_image_analysis(image.id, &analysis, &self.config.vision.image_model)
-                                    .await
-                                {
-                                    warn!("Failed to save analysis for image {}: {}", image.id, e);
-                                } else {
-                                    total_images_analyzed += 1;
-                                    debug!("Analyzed image {}: type={}, condition={:?}", image.id, analysis.image_type, analysis.condition);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to analyze image {}: {}", image.id, e);
-                            }
-                        }
-
-                        self.set_progress(total_images_analyzed, Some(total_pending)).await;
-                    }
-                    info!("Image analysis completed: {}/{}", total_images_analyzed, total_pending);
-                }
-            }
-        }
-
-        // Run listing-level analysis (if auto_analyze enabled)
-        let mut total_listings_analyzed = 0;
-        if let Some(analyzer) = &self.listing_analyzer {
-            if self.config.vision.auto_analyze {
-                // Get all pending listing IDs
-                let listing_ids = self.repository
-                    .get_listings_for_second_layer_analysis(10000)
-                    .await
-                    .unwrap_or_default();
-
-                let total_pending = listing_ids.len();
-                if total_pending > 0 {
-                    self.set_status(JobPhase::AnalyzingListings, Some("AI анализ объявлений")).await;
-                    self.set_progress(0, Some(total_pending)).await;
-
-                    for listing_id in listing_ids {
-                        // Get listing details
-                        let listing = match self.repository.get_listing_for_analysis(listing_id).await {
-                            Ok(Some(l)) => l,
-                            _ => continue,
-                        };
-
-                        // Get image analyses for this listing
-                        let image_analyses = self.repository
-                            .get_listing_image_analyses(listing_id)
-                            .await
-                            .unwrap_or_default();
-
-                        if image_analyses.is_empty() {
-                            continue;
-                        }
-
-                        match analyzer.analyze(&listing, &image_analyses).await {
-                            Ok(analysis) => {
-                                if let Err(e) = self.repository
-                                    .save_listing_analysis(listing_id, &analysis, analyzer.model())
-                                    .await
-                                {
-                                    warn!("Failed to save listing analysis {}: {}", listing_id, e);
-                                } else {
-                                    total_listings_analyzed += 1;
-                                    debug!("Analyzed listing {}: condition={}, shell={}", listing_id, analysis.overall_condition, analysis.is_shell);
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to analyze listing {}: {}", listing_id, e);
-                            }
-                        }
-
-                        self.set_progress(total_listings_analyzed, Some(total_pending)).await;
-                    }
-                    info!("Listing analysis completed: {}/{}", total_listings_analyzed, total_pending);
-                }
-            }
-        }
-
-        Ok(CollectionResult {
-            total_fetched,
-            total_saved,
-            total_images_downloaded,
-            total_images_analyzed,
-            total_listings_analyzed,
-            errors,
-        })
-    }
-
-    /// Collect listings using date range
-    /// Returns (fetched_count, saved_count, oldest_time_in_batch)
-    async fn collect_by_date(
-        &self,
-        date1: &str,
-        date2: &str,
-    ) -> Result<(usize, usize, Option<String>), String> {
-        let query_config = &self.config.api.query;
-
-        let query = ListingsQuery {
-            user: String::new(),
-            token: String::new(),
-            category_id: Some(query_config.category_id.to_string()),
-            city: Some(query_config.city.clone()),
-            nedvigimost_type: Some(query_config.nedvigimost_type.to_string()),
-            limit: Some(1000),
-            withphone: Some(0),
-            withcoords: query_config.withcoords,
-            is_actual: query_config.is_actual.clone(),
-            price1: query_config.price1,
-            price2: query_config.price2,
-            area_from: query_config.area_from,
-            area_to: query_config.area_to,
-            person_type: query_config.person_type,
-            source: query_config.source.clone(),
-            date1: Some(date1.to_string()),
-            date2: Some(date2.to_string()),
-            sort: Some("desc".to_string()), // Newest first, so we can paginate by oldest
+        let permit = self.reserve()?;
+        let initial = JobStatus {
+            phase: job.phase(),
+            started_at: Some(Utc::now()),
+            message: Some("Задача запущена".to_owned()),
             ..Default::default()
         };
-
-        let listings = self
-            .api_client
-            .get_listings(query)
-            .await
-            .map_err(|e| format!("API error: {}", e))?;
-
-        let fetched = listings.len();
-
-        if fetched == 0 {
-            return Ok((0, 0, None));
+        if let Ok(mut status) = self.status.try_write() {
+            *status = initial.clone();
         }
-
-        // Get oldest time for pagination (last item since sorted desc)
-        let oldest_time = listings.last().and_then(|l| l.time.clone());
-
-        let mut saved = 0;
-        for listing in &listings {
-            let (db_listing, photo_urls) =
-                DbListing::from_api_listing(listing, &query_config.city);
-
-            if let Err(e) = self
-                .repository
-                .upsert_listing_with_images(&db_listing, &photo_urls)
-                .await
-            {
-                warn!("Failed to save listing {}: {}", listing.id, e);
-            } else {
-                saved += 1;
-            }
-        }
-
-        Ok((fetched, saved, oldest_time))
-    }
-
-    /// Download images for pending entries
-    async fn download_images_batch(&self, limit: i64) -> Result<usize, String> {
-        let storage = match &self.storage_client {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-
-        let images = self
-            .repository
-            .get_images_for_download(limit)
-            .await
-            .map_err(|e| format!("Failed to get images for download: {}", e))?;
-
-        if images.is_empty() {
-            return Ok(0);
-        }
-
-        debug!("Downloading {} images", images.len());
-        let mut downloaded = 0;
-
-        for image in images {
-            let result = storage
-                .download_and_store_single(image.listing_id, image.image_index, &image.source_url)
-                .await;
-
-            let status = if result.success {
-                downloaded += 1;
-                ImageStatus::Downloaded
-            } else {
-                match result.http_status {
-                    Some(404) => ImageStatus::NotFound,
-                    Some(410) => ImageStatus::Gone,
-                    Some(status) if status >= 500 => {
-                        if image.download_attempts >= 2 {
-                            ImageStatus::Failed
-                        } else {
-                            ImageStatus::Pending
-                        }
+        let _ = self.status_tx.send(initial);
+        tokio::spawn(async move {
+            let phase = job.phase();
+            let work = async {
+                match job {
+                    Job::CheckSources { ids } => self.do_source_checks(&ids).await.map(|_| ()),
+                    Job::Collect => self.do_collection().await.map(|_| ()),
+                    Job::Images { concurrency } => {
+                        self.analyze_images(concurrency, None).await.map(|_| ())
                     }
-                    _ => {
-                        if image.download_attempts >= 2 {
-                            ImageStatus::Failed
-                        } else {
-                            ImageStatus::Pending
-                        }
+                    Job::Listings { concurrency } => {
+                        self.analyze_listings(concurrency).await.map(|_| ())
                     }
+                    Job::ListingImages(id) => {
+                        self.download_listing_images(id).await?;
+                        self.repository
+                            .reset_analysis(id, true)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        self.analyze_images(1, Some(id)).await.map(|_| ())
+                    }
+                    Job::Listing { id, model } => {
+                        self.repository
+                            .reset_analysis(id, false)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        self.analyze_listing(id, model.as_deref()).await
+                    }
+                    Job::Sync { hours } => self.do_sync(hours).await.map(|_| ()),
                 }
             };
-
-            if let Err(e) = self
+            if let Err(e) = self.perform(permit, phase, work).await {
+                tracing::error!("Job failed: {e}");
+            }
+        });
+        Ok(())
+    }
+    pub async fn run_collection(&self) -> Result<CollectionResult, String> {
+        self.perform(
+            self.reserve()?,
+            JobPhase::CollectingListings,
+            self.do_collection(),
+        )
+        .await
+    }
+    pub async fn sync_actuality(&self, hours: u32) -> Result<SyncResult, String> {
+        self.perform(
+            self.reserve()?,
+            JobPhase::SyncingActuality,
+            self.do_sync(hours),
+        )
+        .await
+    }
+    pub async fn run_source_checks(&self, ids: &[i64]) -> Result<usize, String> {
+        self.perform(
+            self.reserve()?,
+            JobPhase::SyncingActuality,
+            self.do_source_checks(ids),
+        )
+        .await
+    }
+    async fn do_source_checks(&self, requested: &[i64]) -> Result<usize, String> {
+        let ids = if requested.is_empty() {
+            self.repository
+                .get_source_check_queue(
+                    self.config.actuality.batch_size as i64,
+                    self.config.actuality.recheck_hours,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            requested.to_vec()
+        };
+        for (index, id) in ids.iter().enumerate() {
+            let listing = self
                 .repository
+                .get_listing_by_id(*id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Listing not found")?;
+            let check = self.source_checker.check(&listing.url).await;
+            self.repository
+                .save_source_check(*id, &check)
+                .await
+                .map_err(|e| e.to_string())?;
+            tracing::info!(listing_id = id, status = check.status.as_str(), http = ?check.http_status, reason = %check.reason, "Source check completed");
+            self.progress(index + 1, ids.len()).await;
+        }
+        Ok(ids.len())
+    }
+    pub async fn run_listing_pipeline(&self, id: i64) -> Result<(), String> {
+        self.perform(self.reserve()?, JobPhase::DownloadingImages, async {
+            self.download_listing_images(id).await?;
+            self.analyze_images(2, Some(id)).await?;
+            self.analyze_listing(id, None).await
+        })
+        .await
+    }
+    async fn download_listing_images(&self, id: i64) -> Result<(), String> {
+        let storage = self
+            .storage_client
+            .as_ref()
+            .ok_or("Storage not configured")?;
+        let images = self
+            .repository
+            .get_images_for_listing(id)
+            .await
+            .map_err(|e| e.to_string())?;
+        for image in images
+            .into_iter()
+            .filter(|image| image.image_index < self.photo_limit())
+        {
+            if image.status == ImageStatus::Downloaded {
+                continue;
+            }
+            if image.download_attempts >= 3 || image.status == ImageStatus::Gone {
+                continue;
+            }
+            let download = storage
+                .download_and_store_single(id, image.image_index, &image.source_url)
+                .await;
+            let status = if download.success {
+                ImageStatus::Downloaded
+            } else {
+                match download.http_status {
+                    Some(404) => ImageStatus::NotFound,
+                    Some(410) => ImageStatus::Gone,
+                    _ if image.download_attempts >= 2 => ImageStatus::Failed,
+                    _ => ImageStatus::Pending,
+                }
+            };
+            self.repository
                 .update_image_download(
                     image.id,
                     status,
-                    result.s3_key.as_deref(),
-                    result.http_status.map(|s| s as i32),
-                    result.error.as_deref(),
+                    download.s3_key.as_deref(),
+                    download.http_status.map(i32::from),
+                    download.error.as_deref(),
                 )
                 .await
-            {
-                warn!("Failed to update image {}: {}", image.id, e);
-            }
+                .map_err(|e| e.to_string())?;
         }
-
-        Ok(downloaded)
+        Ok(())
     }
 
-    /// Run per-image AI analysis continuously until all images are done
-    pub async fn run_image_analysis_all(&self, concurrency: usize) -> Result<usize, String> {
-        let analyzer = match &self.image_analyzer {
-            Some(a) => a.clone(),
-            None => return Err("Image analyzer not configured".to_string()),
-        };
-
-        let storage = match &self.storage_client {
-            Some(s) => s.clone(),
-            None => return Err("Storage client not configured".to_string()),
-        };
-
-        info!("Starting continuous image analysis with concurrency {}", concurrency);
-        let mut total_analyzed = 0;
-        let batch_size = 100i64;
-
+    async fn do_collection(&self) -> Result<CollectionResult, String> {
+        let started = Utc::now();
+        let state = self
+            .repository
+            .get_collection_state()
+            .await
+            .map_err(|e| e.to_string())?;
+        let fingerprint =
+            serde_json::to_string(&self.config.api.query).map_err(|e| e.to_string())?;
+        let since = if state.query_fingerprint.as_deref() == Some(&fingerprint) {
+            state
+                .last_collection_at
+                .unwrap_or(started - Duration::days(self.config.api.initial_load_days as i64))
+        } else {
+            started - Duration::days(self.config.api.initial_load_days as i64)
+        } - Duration::hours(1);
+        let mut upper = started;
+        let mut result = CollectionResult::default();
+        loop {
+            let c = &self.config.api.query;
+            let query = ListingsQuery {
+                category_id: Some(c.category_id.to_string()),
+                city: Some(c.city.clone()),
+                nedvigimost_type: Some(c.nedvigimost_type.to_string()),
+                limit: Some(1000),
+                withphone: Some(0),
+                withcoords: c.withcoords,
+                is_actual: c.is_actual.clone(),
+                price1: c.price1,
+                price2: c.price2,
+                area_from: c.area_from,
+                area_to: c.area_to,
+                person_type: c.person_type,
+                source: c.source.clone(),
+                date1: Some(api_time(since)),
+                date2: Some(api_time(upper)),
+                sort: Some("desc".to_owned()),
+                ..Default::default()
+            };
+            let listings = self
+                .api_client
+                .get_listings(query)
+                .await
+                .map_err(|e| e.to_string())?;
+            result.total_fetched += listings.len();
+            for listing in &listings {
+                let (db, urls) = DbListing::from_api_listing(listing, &c.city);
+                self.repository
+                    .upsert_listing_with_images(&db, &urls)
+                    .await
+                    .map_err(|e| format!("Save {}: {e}", db.id))?;
+                result.total_saved += 1;
+            }
+            if listings.len() < 1000 {
+                break;
+            }
+            let oldest = listings
+                .last()
+                .and_then(|l| l.time.as_deref())
+                .ok_or("Missing pagination timestamp")?;
+            let next = chrono::NaiveDateTime::parse_from_str(oldest, "%Y-%m-%d %H:%M:%S")
+                .map_err(|e| e.to_string())?
+                .and_utc()
+                - Duration::minutes(150)
+                + Duration::seconds(1);
+            if next >= upper || next < since {
+                return Err(
+                    "Collection pagination did not advance; checkpoint unchanged".to_owned(),
+                );
+            }
+            upper = next;
+        }
+        // The upper bound captured before fetching is durable only after every row is saved.
+        self.repository
+            .update_collection_checkpoint(started, &fingerprint)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(storage) = &self.storage_client {
+            self.phase(JobPhase::DownloadingImages, "Загрузка фотографий")
+                .await;
+            let mut remaining = self.config.api.max_downloads_per_run as usize;
+            while remaining > 0 {
+                let images = self
+                    .repository
+                    .get_images_for_download_batch(remaining.min(100) as i64, self.photo_limit())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if images.is_empty() {
+                    break;
+                }
+                let total = images.len();
+                remaining -= total;
+                for (index, image) in images.into_iter().enumerate() {
+                    let download = storage
+                        .download_and_store_single(
+                            image.listing_id,
+                            image.image_index,
+                            &image.source_url,
+                        )
+                        .await;
+                    let status = if download.success {
+                        result.total_images_downloaded += 1;
+                        ImageStatus::Downloaded
+                    } else {
+                        match download.http_status {
+                            Some(404) => ImageStatus::NotFound,
+                            Some(410) => ImageStatus::Gone,
+                            _ if image.download_attempts >= 2 => ImageStatus::Failed,
+                            _ => ImageStatus::Pending,
+                        }
+                    };
+                    self.repository
+                        .update_image_download(
+                            image.id,
+                            status,
+                            download.s3_key.as_deref(),
+                            download.http_status.map(i32::from),
+                            download.error.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    self.progress(index + 1, total).await;
+                }
+            }
+        }
+        if self.config.vision.auto_analyze {
+            if self.image_analyzer.is_some() && self.storage_client.is_some() {
+                result.total_images_analyzed = self.analyze_images(3, None).await?;
+            }
+            if self.listing_analyzer.is_some() {
+                result.total_listings_analyzed = self.analyze_listings(3).await?;
+            }
+        }
+        Ok(result)
+    }
+    fn photo_limit(&self) -> i32 {
+        self.config
+            .vision
+            .filter
+            .max_photos
+            .unwrap_or(i32::MAX as usize)
+            .min(i32::MAX as usize) as i32
+    }
+    async fn passes_filter(&self, id: i64) -> Result<bool, String> {
+        let l = self
+            .repository
+            .get_listing_for_analysis(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("Listing not found")?;
+        let count = self
+            .repository
+            .get_image_count_for_listing(id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(self.config.vision.filter.passes_filter(
+            count as usize,
+            l.price,
+            l.area,
+            Some(&l.source),
+            l.has_coords(),
+        ))
+    }
+    async fn analyze_images(
+        &self,
+        concurrency: usize,
+        listing: Option<i64>,
+    ) -> Result<usize, String> {
+        let analyzer = self
+            .image_analyzer
+            .as_ref()
+            .ok_or("Image analyzer not configured")?;
+        let storage = self
+            .storage_client
+            .as_ref()
+            .ok_or("Storage not configured")?;
+        self.phase(JobPhase::AnalyzingImages, "Анализ фотографий")
+            .await;
+        let mut done = 0;
+        let mut errors = Vec::new();
         loop {
             let images = self
                 .repository
-                .get_images_for_ai_analysis(batch_size)
+                .get_images_for_ai_analysis(
+                    100,
+                    self.config.vision.max_retries as i32,
+                    self.photo_limit(),
+                    listing,
+                )
                 .await
-                .map_err(|e| format!("Failed to get images for analysis: {}", e))?;
-
+                .map_err(|e| e.to_string())?;
             if images.is_empty() {
-                info!("All images analyzed! Total: {}", total_analyzed);
                 break;
             }
-
-            let batch_count = images.len();
-            debug!("Processing batch of {} images", batch_count);
-
-            let analyzed = Arc::new(AtomicUsize::new(0));
-            let repository = self.repository.clone();
-            let model = analyzer.model().to_string();
-
-            stream::iter(images)
-                .map(|image| {
-                    let analyzer = analyzer.clone();
-                    let storage = storage.clone();
-                    let repository = repository.clone();
-                    let analyzed = analyzed.clone();
-                    let model = model.clone();
-
-                    async move {
-                        let s3_key = match &image.s3_key {
-                            Some(k) => k.clone(),
-                            None => return,
-                        };
-
-                        let image_bytes = match storage.get_image_by_key(&s3_key).await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!("Image {} not found in S3, marking as failed: {}", image.id, e);
-                                // Mark as failed so we don't keep retrying
-                                let _ = repository.mark_image_s3_missing(image.id).await;
-                                return;
-                            }
-                        };
-
-                        let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-                        match analyzer.analyze_base64(&image_base64).await {
-                            Ok(analysis) => {
-                                if let Err(e) = repository
-                                    .save_image_analysis(image.id, &analysis, &model)
-                                    .await
-                                {
-                                    warn!("Failed to save analysis for image {}: {}", image.id, e);
-                                } else {
-                                    analyzed.fetch_add(1, Ordering::Relaxed);
-                                    debug!(
-                                        "Analyzed image {}: type={}, condition={:?}",
-                                        image.id, analysis.image_type, analysis.condition
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to analyze image {}: {}", image.id, e);
-                            }
+            let total = images.len();
+            let mut work = stream::iter(images)
+                .map(|image| async move {
+                    self.repository
+                        .begin_image_attempt(image.id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let result = async {
+                        if !self.passes_filter(image.listing_id).await? {
+                            return Ok(ImageAnalysisResult {
+                                image_type: "other".to_owned(),
+                                room: None,
+                                condition: None,
+                                confidence: 0,
+                                issues: vec![],
+                                description: "Пропущено фильтром анализа".to_owned(),
+                            });
+                        }
+                        let key = image.s3_key.as_deref().ok_or("Image has no storage key")?;
+                        let bytes = storage
+                            .get_image_by_key(key)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                        analyzer
+                            .analyze_base64(&encoded)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                    .await;
+                    match result {
+                        Ok(analysis) => self
+                            .repository
+                            .save_image_analysis(image.id, &analysis, analyzer.model())
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => {
+                            self.repository
+                                .fail_image_analysis(image.id, &e)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Err(e)
                         }
                     }
                 })
-                .buffer_unordered(concurrency)
-                .collect::<Vec<()>>()
-                .await;
-
-            let batch_analyzed = analyzed.load(Ordering::Relaxed);
-            total_analyzed += batch_analyzed;
-            info!("Batch complete: {}/{} analyzed (total: {})", batch_analyzed, batch_count, total_analyzed);
+                .buffer_unordered(concurrency);
+            let mut processed = 0;
+            while let Some(result) = work.next().await {
+                processed += 1;
+                match result {
+                    Ok(()) => done += 1,
+                    Err(e) => errors.push(e),
+                };
+                self.progress(processed, total).await;
+            }
         }
-
-        Ok(total_analyzed)
+        if errors.is_empty() {
+            Ok(done)
+        } else {
+            Err(format!(
+                "{done} photos analyzed, {} failed; retries delayed: {}",
+                errors.len(),
+                errors[0]
+            ))
+        }
     }
-
-    /// Run per-image AI analysis batch (single batch, for backward compatibility)
-    async fn analyze_images_batch(&self, limit: i64) -> Result<usize, String> {
-        let analyzer = match &self.image_analyzer {
-            Some(a) => a,
-            None => return Ok(0),
-        };
-
-        let storage = match &self.storage_client {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-
-        let images = self
+    async fn analyze_listing(&self, id: i64, model: Option<&str>) -> Result<(), String> {
+        let listing = self
             .repository
-            .get_images_for_ai_analysis(limit)
+            .get_listing_for_analysis(id)
             .await
-            .map_err(|e| format!("Failed to get images for analysis: {}", e))?;
-
-        if images.is_empty() {
-            return Ok(0);
-        }
-
-        debug!("Analyzing {} images", images.len());
-        let mut analyzed = 0;
-
-        for image in images {
-            let s3_key = match &image.s3_key {
-                Some(k) => k,
-                None => continue,
-            };
-
-            // Get image from S3 and convert to base64
-            let image_bytes = match storage.get_image_by_key(s3_key).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("Failed to get image {} from S3: {}", image.id, e);
-                    continue;
-                }
-            };
-
-            let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-            match analyzer.analyze_base64(&image_base64).await {
-                Ok(analysis) => {
-                    if let Err(e) = self
-                        .repository
-                        .save_image_analysis(image.id, &analysis, analyzer.model())
-                        .await
-                    {
-                        warn!("Failed to save analysis for image {}: {}", image.id, e);
-                    } else {
-                        analyzed += 1;
-                        debug!(
-                            "Analyzed image {}: type={}, condition={:?}",
-                            image.id, analysis.image_type, analysis.condition
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to analyze image {}: {}", image.id, e);
-                }
-            }
-        }
-
-        Ok(analyzed)
-    }
-
-    /// Run listing-level AI analysis batch
-    async fn analyze_listings_batch(&self, limit: i64) -> Result<usize, String> {
-        let analyzer = match &self.listing_analyzer {
-            Some(a) => a,
-            None => return Ok(0),
-        };
-
-        let listing_ids = self
+            .map_err(|e| e.to_string())?
+            .ok_or("Listing not found")?;
+        let all = self
             .repository
-            .get_listings_for_second_layer_analysis(limit)
+            .get_images_for_listing(id)
             .await
-            .map_err(|e| format!("Failed to get listings for analysis: {}", e))?;
-
-        if listing_ids.is_empty() {
-            return Ok(0);
+            .map_err(|e| e.to_string())?;
+        if all.iter().any(|i| {
+            i.image_index < self.photo_limit()
+                && (i.status == ImageStatus::Pending
+                    || (i.status == ImageStatus::NotFound && i.download_attempts < 2)
+                    || (i.status == ImageStatus::Downloaded
+                        && i.ai_analyzed_at.is_none()
+                        && i.ai_attempts < self.config.vision.max_retries as i32))
+        }) {
+            return Err("Фотографии ещё не обработаны".to_owned());
         }
-
-        debug!("Analyzing {} listings", listing_ids.len());
-        let mut analyzed = 0;
-
-        for listing_id in listing_ids {
-            let listing = match self
-                .repository
-                .get_listing_for_analysis(listing_id)
-                .await
-                .map_err(|e| format!("Failed to get listing {}: {}", listing_id, e))?
-            {
-                Some(l) => l,
-                None => continue,
-            };
-
-            let image_analyses = self
-                .repository
-                .get_listing_image_analyses(listing_id)
-                .await
-                .map_err(|e| format!("Failed to get image analyses for {}: {}", listing_id, e))?;
-
-            if image_analyses.is_empty() {
-                continue;
-            }
-
-            match analyzer.analyze(&listing, &image_analyses).await {
-                Ok(analysis) => {
-                    if let Err(e) = self
-                        .repository
-                        .save_listing_analysis(listing_id, &analysis, analyzer.model())
-                        .await
-                    {
-                        warn!(
-                            "Failed to save listing analysis for {}: {}",
-                            listing_id, e
-                        );
-                    } else {
-                        analyzed += 1;
-                        debug!(
-                            "Analyzed listing {}: condition={}, shell={}",
-                            listing_id, analysis.overall_condition, analysis.is_shell
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to analyze listing {}: {}", listing_id, e);
-                }
-            }
-        }
-
-        Ok(analyzed)
-    }
-
-    /// Sync actuality status of listings
-    pub async fn sync_actuality(&self, hours: u32) -> Result<SyncResult, String> {
-        info!("Starting actuality sync for the last {} hours", hours);
-
-        let check_feed = self
-            .api_client
-            .get_check_feed_since_hours(hours)
+        self.repository
+            .begin_listing_attempt(id)
             .await
-            .map_err(|e| format!("Failed to get check feed: {}", e))?;
-
-        info!("Received {} items from check feed", check_feed.len());
-
-        let mut marked_inactive = 0;
-        let mut still_active = 0;
-
-        for item in check_feed {
-            if item.is_actual == 0 {
-                match self.repository.mark_listing_inactive(item.id).await {
-                    Ok(updated) => {
-                        if updated {
-                            marked_inactive += 1;
-                            debug!("Marked listing {} as inactive", item.id);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to mark listing {} as inactive: {}", item.id, e);
-                    }
-                }
+            .map_err(|e| e.to_string())?;
+        let result: Result<(ListingAnalysisResult, String), String> = async {
+            if !self.passes_filter(id).await? {
+                return Ok((
+                    ListingAnalysisResult::unknown(
+                        "Недостаточно данных: объявление не прошло фильтр анализа",
+                    ),
+                    "none".to_owned(),
+                ));
+            }
+            let custom;
+            let analyzer = if let Some(model) = model {
+                custom = ListingAnalyzer::new(
+                    self.vision_api_key
+                        .clone()
+                        .ok_or("Model key not configured")?,
+                    model.to_owned(),
+                    self.config.vision.api_base_url.clone(),
+                );
+                &custom
             } else {
-                still_active += 1;
+                self.listing_analyzer
+                    .as_ref()
+                    .ok_or("Listing analyzer not configured")?
+                    .as_ref()
+            };
+            let mut images = self
+                .repository
+                .get_listing_image_analyses(id)
+                .await
+                .map_err(|e| e.to_string())?;
+            images.retain(|i| i.image_index < self.photo_limit());
+            Ok((
+                analyzer
+                    .analyze(&listing, &images)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                analyzer.model().to_owned(),
+            ))
+        }
+        .await;
+        match result {
+            Ok((analysis, model)) => self
+                .repository
+                .save_listing_analysis(id, &analysis, &model)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => {
+                self.repository
+                    .fail_listing_analysis(id, &e)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Err(e)
             }
         }
-
-        info!(
-            "Actuality sync completed: {} marked inactive, {} still active",
-            marked_inactive, still_active
-        );
-
-        Ok(SyncResult {
-            total_checked: marked_inactive + still_active,
-            marked_inactive,
-            still_active,
-        })
     }
-
-    /// Check actuality for specific listing IDs
+    async fn analyze_listings(&self, concurrency: usize) -> Result<usize, String> {
+        self.phase(JobPhase::AnalyzingListings, "Анализ объявлений")
+            .await;
+        let mut done = 0;
+        let mut errors = Vec::new();
+        loop {
+            let ids = self
+                .repository
+                .get_listings_for_second_layer_analysis(
+                    100,
+                    self.config.vision.max_retries as i32,
+                    self.photo_limit(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            if ids.is_empty() {
+                break;
+            }
+            let total = ids.len();
+            let mut work = stream::iter(ids)
+                .map(|id| self.analyze_listing(id, None))
+                .buffer_unordered(concurrency);
+            let mut processed = 0;
+            while let Some(result) = work.next().await {
+                processed += 1;
+                match result {
+                    Ok(()) => done += 1,
+                    Err(e) => errors.push(e),
+                };
+                self.progress(processed, total).await;
+            }
+        }
+        if errors.is_empty() {
+            Ok(done)
+        } else {
+            Err(format!(
+                "{done} listings analyzed, {} failed; retries delayed: {}",
+                errors.len(),
+                errors[0]
+            ))
+        }
+    }
+    async fn do_sync(&self, hours: u32) -> Result<SyncResult, String> {
+        let through = Utc::now();
+        let state = self
+            .repository
+            .get_collection_state()
+            .await
+            .map_err(|e| e.to_string())?;
+        let since = state
+            .last_sync_at
+            .unwrap_or(through - Duration::hours(hours as i64))
+            - Duration::hours(1);
+        let ids = self
+            .repository
+            .get_listing_ids()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut result = SyncResult::default();
+        for chunk in ids.chunks(250) {
+            let checks = self
+                .api_client
+                .get_check_feed_between(since, through, chunk)
+                .await
+                .map_err(|e| e.to_string())?;
+            for item in checks {
+                let Some(time) = item.time.as_deref().and_then(parse_moscow) else {
+                    return Err("Invalid actuality timestamp; checkpoint unchanged".to_owned());
+                };
+                if self
+                    .repository
+                    .apply_actuality(item.id, item.is_actual != 0, time)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    result.total_checked += 1;
+                    if item.is_actual == 0 {
+                        result.marked_inactive += 1;
+                    } else {
+                        result.still_active += 1;
+                    }
+                }
+            }
+        }
+        self.repository
+            .update_sync_checkpoint(through)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(result)
+    }
     pub async fn check_actuality_by_ids(
         &self,
         ids: &[i64],
     ) -> Result<Vec<CheckActualityResult>, String> {
-        let results = self
+        let _permit = self.reserve()?;
+        let rows = self
             .api_client
             .check_actuality_by_ids(ids)
             .await
-            .map_err(|e| format!("Failed to check actuality: {}", e))?;
-
-        Ok(results
-            .into_iter()
-            .map(|item| CheckActualityResult {
-                id: item.id,
-                is_actual: item.is_actual,
-                checked_at: item.time,
-            })
-            .collect())
-    }
-
-    /// Run listing-level AI analysis continuously until all listings are done
-    pub async fn run_listing_analysis_all(&self, concurrency: usize) -> Result<usize, String> {
-        let analyzer = match &self.listing_analyzer {
-            Some(a) => a.clone(),
-            None => return Err("Listing analyzer not configured".to_string()),
-        };
-
-        info!("Starting continuous listing analysis with concurrency {}", concurrency);
-        let mut total_analyzed = 0;
-        let batch_size = 100i64;
-
-        loop {
-            let listing_ids = self
-                .repository
-                .get_listings_for_second_layer_analysis(batch_size)
-                .await
-                .map_err(|e| format!("Failed to get listings for analysis: {}", e))?;
-
-            if listing_ids.is_empty() {
-                break;
-            }
-
-            info!("Processing batch of {} listings", listing_ids.len());
-
-            // Process concurrently using semaphore
-            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-            let mut handles = Vec::new();
-
-            for listing_id in listing_ids {
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
-                let repo = self.repository.clone();
-                let analyzer = analyzer.clone();
-
-                let handle = tokio::spawn(async move {
-                    let _permit = permit;
-
-                    let listing = match repo.get_listing_for_analysis(listing_id).await {
-                        Ok(Some(l)) => l,
-                        Ok(None) => return None,
-                        Err(e) => {
-                            warn!("Failed to get listing {}: {}", listing_id, e);
-                            return None;
-                        }
-                    };
-
-                    let image_analyses = match repo.get_listing_image_analyses(listing_id).await {
-                        Ok(a) => a,
-                        Err(e) => {
-                            warn!("Failed to get image analyses for {}: {}", listing_id, e);
-                            return None;
-                        }
-                    };
-
-                    // Handle case with no analyzed images - mark as "no photos"
-                    if image_analyses.is_empty() {
-                        let no_photos_analysis = crate::db::ListingAnalysisResult {
-                            overall_condition: 0,
-                            is_shell: true,
-                            move_in_ready: false,
-                            red_flags: vec!["Нет фото".to_string()],
-                            summary: "Объявление без фотографий. Невозможно оценить состояние квартиры.".to_string(),
-                        };
-                        if let Err(e) = repo
-                            .save_listing_analysis(listing_id, &no_photos_analysis, "none")
-                            .await
-                        {
-                            warn!("Failed to save no-photos analysis for {}: {}", listing_id, e);
-                            return None;
-                        }
-                        debug!("Marked listing {} as no-photos", listing_id);
-                        return Some(());
-                    }
-
-                    match analyzer.analyze(&listing, &image_analyses).await {
-                        Ok(analysis) => {
-                            if let Err(e) = repo
-                                .save_listing_analysis(listing_id, &analysis, analyzer.model())
-                                .await
-                            {
-                                warn!("Failed to save listing analysis for {}: {}", listing_id, e);
-                                None
-                            } else {
-                                debug!("Analyzed listing {}: condition={}", listing_id, analysis.overall_condition);
-                                Some(())
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to analyze listing {}: {}", listing_id, e);
-                            None
-                        }
-                    }
-                });
-
-                handles.push(handle);
-            }
-
-            let results = futures::future::join_all(handles).await;
-            let batch_analyzed = results.into_iter().filter(|r| r.as_ref().ok().and_then(|o| o.as_ref()).is_some()).count();
-            total_analyzed += batch_analyzed;
-            info!("Listing analysis batch completed: {} analyzed (total: {})", batch_analyzed, total_analyzed);
-        }
-
-        info!("Continuous listing analysis completed: {} total", total_analyzed);
-        Ok(total_analyzed)
-    }
-
-    /// Analyze all images for a single listing
-    pub async fn analyze_listing_images(&self, listing_id: i64) -> Result<usize, String> {
-        let analyzer = match &self.image_analyzer {
-            Some(a) => a,
-            None => return Err("Image analyzer not configured".to_string()),
-        };
-
-        let storage = match &self.storage_client {
-            Some(s) => s,
-            None => return Err("Storage client not configured".to_string()),
-        };
-
-        let images = self
-            .repository
-            .get_images_for_listing(listing_id)
-            .await
-            .map_err(|e| format!("Failed to get images: {}", e))?;
-
-        let downloaded_images: Vec<_> = images
-            .into_iter()
-            .filter(|img| img.s3_key.is_some() && img.status == ImageStatus::Downloaded)
-            .collect();
-
-        if downloaded_images.is_empty() {
-            return Ok(0);
-        }
-
-        info!("Analyzing {} images for listing {}", downloaded_images.len(), listing_id);
-        let mut analyzed = 0;
-
-        for image in downloaded_images {
-            let s3_key = image.s3_key.as_ref().unwrap();
-
-            let image_bytes = match storage.get_image_by_key(s3_key).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("Failed to get image {} from S3: {}", image.id, e);
-                    continue;
-                }
-            };
-
-            let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-            match analyzer.analyze_base64(&image_base64).await {
-                Ok(analysis) => {
-                    if let Err(e) = self
-                        .repository
-                        .save_image_analysis(image.id, &analysis, analyzer.model())
-                        .await
-                    {
-                        warn!("Failed to save analysis for image {}: {}", image.id, e);
-                    } else {
-                        analyzed += 1;
-                        debug!(
-                            "Analyzed image {}: type={}, condition={:?}",
-                            image.id, analysis.image_type, analysis.condition
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to analyze image {}: {}", image.id, e);
-                }
-            }
-        }
-
-        Ok(analyzed)
-    }
-
-    /// Analyze a single listing (second layer)
-    pub async fn analyze_single_listing(&self, listing_id: i64) -> Result<bool, String> {
-        self.analyze_single_listing_with_model(listing_id, None).await
-    }
-
-    /// Analyze a single listing with optional custom model
-    pub async fn analyze_single_listing_with_model(
-        &self,
-        listing_id: i64,
-        custom_model: Option<String>,
-    ) -> Result<bool, String> {
-        // Create temporary analyzer if custom model specified, otherwise use default
-        let temp_analyzer: Option<ListingAnalyzer>;
-        let analyzer: &ListingAnalyzer = match &custom_model {
-            Some(model) => {
-                let api_key = self
-                    .vision_api_key
-                    .as_ref()
-                    .ok_or_else(|| "Model API key not configured".to_string())?;
-                temp_analyzer = Some(ListingAnalyzer::new(
-                    api_key.clone(),
-                    model.clone(),
-                    self.config.vision.api_base_url.clone(),
-                ));
-                temp_analyzer.as_ref().unwrap()
-            }
-            None => match &self.listing_analyzer {
-                Some(a) => a.as_ref(),
-                None => return Err("Listing analyzer not configured".to_string()),
-            },
-        };
-
-        let listing = match self
-            .repository
-            .get_listing_for_analysis(listing_id)
-            .await
-            .map_err(|e| format!("Failed to get listing {}: {}", listing_id, e))?
-        {
-            Some(l) => l,
-            None => return Err(format!("Listing {} not found", listing_id)),
-        };
-
-        // Check if listing has any images at all
-        let all_images = self
-            .repository
-            .get_images_for_listing(listing_id)
-            .await
-            .map_err(|e| format!("Failed to get images: {}", e))?;
-
-        // If no images at all, save "no photos" analysis
-        if all_images.is_empty() {
-            let no_photos_analysis = crate::db::ListingAnalysisResult {
-                overall_condition: 0,
-                is_shell: true,
-                move_in_ready: false,
-                red_flags: vec!["Нет фото".to_string()],
-                summary: "Объявление без фотографий, невозможно оценить состояние квартиры."
-                    .to_string(),
-            };
-
-            self.repository
-                .save_listing_analysis(listing_id, &no_photos_analysis, "none")
-                .await
-                .map_err(|e| format!("Failed to save analysis: {}", e))?;
-
-            info!(
-                "Listing {} has no photos, marked as no data",
-                listing_id
-            );
-            return Ok(true);
-        }
-
-        let image_analyses = self
-            .repository
-            .get_listing_image_analyses(listing_id)
-            .await
-            .map_err(|e| format!("Failed to get image analyses: {}", e))?;
-
-        // If has images but none analyzed yet, return error (need to analyze images first)
-        if image_analyses.is_empty() {
-            return Err("No analyzed images for this listing. Run image analysis first.".to_string());
-        }
-
-        info!(
-            "Analyzing listing {} with {} image analyses using model: {}",
-            listing_id,
-            image_analyses.len(),
-            analyzer.model()
-        );
-
-        match analyzer.analyze(&listing, &image_analyses).await {
-            Ok(analysis) => {
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(time) = row.time.as_deref().and_then(parse_moscow) {
                 self.repository
-                    .save_listing_analysis(listing_id, &analysis, analyzer.model())
+                    .apply_actuality(row.id, row.is_actual != 0, time)
                     .await
-                    .map_err(|e| format!("Failed to save analysis: {}", e))?;
-
-                info!(
-                    "Analyzed listing {}: condition={}, shell={}, model={}",
-                    listing_id, analysis.overall_condition, analysis.is_shell, analyzer.model()
-                );
-                Ok(true)
+                    .map_err(|e| e.to_string())?;
             }
-            Err(e) => Err(format!("Analysis failed: {}", e)),
+            out.push(CheckActualityResult {
+                id: row.id,
+                is_actual: row.is_actual,
+                checked_at: row.time,
+            });
         }
+        Ok(out)
     }
 }
-
-#[derive(Debug)]
+fn api_time(time: DateTime<Utc>) -> String {
+    (time + Duration::minutes(150))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+fn parse_moscow(time: &str) -> Option<DateTime<Utc>> {
+    chrono::NaiveDateTime::parse_from_str(time, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|v| v.and_utc() - Duration::hours(3))
+}
+#[derive(Debug, Default, Serialize)]
 pub struct CollectionResult {
     pub total_fetched: usize,
     pub total_saved: usize,
@@ -1160,39 +838,23 @@ pub struct CollectionResult {
     pub total_listings_analyzed: usize,
     pub errors: Vec<String>,
 }
-
 impl CollectionResult {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "total_fetched": self.total_fetched,
-            "total_saved": self.total_saved,
-            "total_images_downloaded": self.total_images_downloaded,
-            "total_images_analyzed": self.total_images_analyzed,
-            "total_listings_analyzed": self.total_listings_analyzed,
-            "errors": self.errors,
-            "success": self.errors.is_empty()
-        })
+        serde_json::to_value(self).expect("collection result serializes")
     }
 }
-
-#[derive(Debug)]
+#[derive(Debug, Default, Serialize)]
 pub struct SyncResult {
     pub total_checked: usize,
     pub marked_inactive: usize,
     pub still_active: usize,
 }
-
 impl SyncResult {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "total_checked": self.total_checked,
-            "marked_inactive": self.marked_inactive,
-            "still_active": self.still_active
-        })
+        serde_json::to_value(self).expect("sync result serializes")
     }
 }
-
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CheckActualityResult {
     pub id: i64,
     pub is_actual: i32,

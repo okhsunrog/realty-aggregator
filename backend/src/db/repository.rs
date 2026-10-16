@@ -90,90 +90,114 @@ impl Repository {
     // ==================== Listings ====================
 
     pub async fn upsert_listing(&self, listing: &DbListing) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query!(
-            r#"
-            INSERT INTO listings (
-                id, source, url, title, description, price, city, address,
-                lat, lng, rooms, area, floor, floors_total, person_type,
-                params, time_created, time_updated, fetched_at, is_active
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-            )
-            ON CONFLICT (id) DO UPDATE SET
-                source = EXCLUDED.source,
-                url = EXCLUDED.url,
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                price = EXCLUDED.price,
-                city = EXCLUDED.city,
-                address = EXCLUDED.address,
-                lat = EXCLUDED.lat,
-                lng = EXCLUDED.lng,
-                rooms = EXCLUDED.rooms,
-                area = EXCLUDED.area,
-                floor = EXCLUDED.floor,
-                floors_total = EXCLUDED.floors_total,
-                person_type = EXCLUDED.person_type,
-                params = EXCLUDED.params,
-                time_created = EXCLUDED.time_created,
-                time_updated = EXCLUDED.time_updated,
-                fetched_at = EXCLUDED.fetched_at,
-                is_active = EXCLUDED.is_active
-            "#,
-            listing.id,
-            &listing.source,
-            &listing.url,
-            listing.title.as_deref(),
-            listing.description.as_deref(),
-            listing.price,
-            &listing.city,
-            listing.address.as_deref(),
-            listing.lat,
-            listing.lng,
-            listing.rooms,
-            listing.area,
-            listing.floor,
-            listing.floors_total,
-            listing.person_type,
-            listing.params.as_ref(),
-            listing.time_created,
-            listing.time_updated,
-            listing.fetched_at,
-            listing.is_active
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        self.ingest_listing(listing, None).await
     }
 
     pub async fn upsert_listing_with_images(
         &self,
         listing: &DbListing,
-        photo_urls: &[String],
+        urls: &[String],
     ) -> Result<(), sqlx::Error> {
-        self.upsert_listing(listing).await?;
-
-        // Insert images (ignore conflicts for existing images)
-        for (index, url) in photo_urls.iter().enumerate() {
-            sqlx::query!(
-                r#"
-                INSERT INTO images (listing_id, image_index, source_url)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (listing_id, image_index) DO NOTHING
-                "#,
-                listing.id,
-                index as i32,
-                url
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
+        self.ingest_listing(listing, Some(urls)).await?;
         Ok(())
     }
 
+    async fn ingest_listing(
+        &self,
+        l: &DbListing,
+        photos: Option<&[String]>,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let previous = sqlx::query!(r#"
+            SELECT price, (title, description, price, area, rooms, floor, floors_total, address, params, lat, lng)
+                IS DISTINCT FROM ($2::text, $3::text, $4::bigint, $5::float8, $6::int,
+                    $7::int, $8::int, $9::text, $10::jsonb, $11::float8, $12::float8) AS "changed!"
+            FROM listings WHERE id = $1 FOR UPDATE
+            "#, l.id, l.title.as_deref(), l.description.as_deref(), l.price, l.area, l.rooms,
+            l.floor, l.floors_total, l.address.as_deref(), l.params.as_ref(), l.lat, l.lng)
+            .fetch_optional(&mut *tx).await?;
+        let accepted = sqlx::query!(r#"
+            INSERT INTO listings (id, source, url, title, description, price, city, address,
+                lat, lng, rooms, area, floor, floors_total, person_type, params,
+                time_created, time_updated, fetched_at, is_active, source_time)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+            ON CONFLICT (id) DO UPDATE SET source = EXCLUDED.source, url = EXCLUDED.url,
+                title = EXCLUDED.title, description = EXCLUDED.description, price = EXCLUDED.price,
+                city = EXCLUDED.city, address = EXCLUDED.address, lat = EXCLUDED.lat, lng = EXCLUDED.lng,
+                rooms = EXCLUDED.rooms, area = EXCLUDED.area, floor = EXCLUDED.floor,
+                floors_total = EXCLUDED.floors_total, person_type = EXCLUDED.person_type,
+                params = EXCLUDED.params, time_created = EXCLUDED.time_created,
+                time_updated = EXCLUDED.time_updated, fetched_at = EXCLUDED.fetched_at,
+                source_time = EXCLUDED.source_time,
+                is_active = CASE WHEN listings.actuality_checked_at > EXCLUDED.source_time
+                    THEN listings.is_active ELSE EXCLUDED.is_active END
+            WHERE listings.source_time IS NULL OR EXCLUDED.source_time >= listings.source_time
+            "#, l.id, &l.source, &l.url, l.title.as_deref(), l.description.as_deref(), l.price,
+            &l.city, l.address.as_deref(), l.lat, l.lng, l.rooms, l.area, l.floor, l.floors_total,
+            l.person_type, l.params.as_ref(), l.time_created, l.time_updated, l.fetched_at,
+            l.is_active, l.source_time).execute(&mut *tx).await?.rows_affected() > 0;
+        if !accepted {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let mut changed = previous.as_ref().is_none_or(|p| p.changed);
+        if let Some(price) = l.price {
+            if previous.as_ref().is_none_or(|p| p.price != Some(price)) {
+                sqlx::query!(
+                    r#"INSERT INTO listing_price_history (listing_id, observed_at, price)
+                    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
+                    l.id,
+                    l.source_time.unwrap_or(l.fetched_at),
+                    price
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        if let Some(urls) = photos {
+            let old = sqlx::query_scalar!(
+                "SELECT source_url FROM images WHERE listing_id = $1 ORDER BY image_index",
+                l.id
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            changed |= old != urls;
+            sqlx::query!(
+                "DELETE FROM images WHERE listing_id = $1 AND image_index >= $2",
+                l.id,
+                urls.len() as i32
+            )
+            .execute(&mut *tx)
+            .await?;
+            for (index, url) in urls.iter().enumerate() {
+                sqlx::query!(r#"
+                    INSERT INTO images (listing_id, image_index, source_url) VALUES ($1,$2,$3)
+                    ON CONFLICT (listing_id, image_index) DO UPDATE SET source_url = EXCLUDED.source_url,
+                        status = 'pending', s3_key = NULL, downloaded_at = NULL, http_status = NULL,
+                        download_attempts = 0, last_error = NULL, ai_image_type = NULL, ai_room = NULL,
+                        ai_condition = NULL, ai_confidence = NULL, ai_issues = NULL, ai_description = NULL,
+                        ai_model = NULL, ai_analyzed_at = NULL, ai_attempts = 0, ai_retry_at = NULL, ai_last_error = NULL
+                    WHERE images.source_url IS DISTINCT FROM EXCLUDED.source_url
+                    "#, l.id, index as i32, url).execute(&mut *tx).await?;
+            }
+        }
+        if changed {
+            sqlx::query!(
+                r#"UPDATE listings SET analysis_condition = NULL, analysis_is_shell = NULL,
+                analysis_move_in_ready = NULL, analysis_red_flags = NULL, analysis_summary = NULL,
+                analysis_model = NULL, analyzed_at = NULL, analysis_attempts = 0,
+                analysis_retry_at = NULL, analysis_last_error = NULL WHERE id = $1"#,
+                l.id
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn mark_listing_inactive(&self, id: i64) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query!("UPDATE listings SET is_active = false WHERE id = $1", id)
+        let result = sqlx::query!("UPDATE listings SET is_active = false, actuality_checked_at = NOW(), actuality_origin = 'manual' WHERE id = $1", id)
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
@@ -236,38 +260,32 @@ impl Repository {
     pub async fn get_collection_state(&self) -> Result<CollectionState, sqlx::Error> {
         sqlx::query_as!(
             CollectionState,
-            "SELECT id, last_listing_id, last_collection_at FROM collection_state WHERE id = 1"
+            "SELECT id, last_listing_id, last_collection_at, query_fingerprint, last_sync_at FROM collection_state WHERE id = 1"
         )
         .fetch_one(&self.pool)
         .await
     }
 
-    pub async fn update_collection_state(&self, last_listing_id: i64) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"
-            UPDATE collection_state SET last_listing_id = $1, last_collection_at = NOW()
-            WHERE id = 1
-            "#,
-            last_listing_id
-        )
-        .execute(&self.pool)
-        .await?;
+    pub async fn update_collection_checkpoint(
+        &self,
+        through: chrono::DateTime<chrono::Utc>,
+        fingerprint: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!("UPDATE collection_state SET last_collection_at = $1, query_fingerprint = $2 WHERE id = 1", through, fingerprint)
+            .execute(&self.pool).await?;
         Ok(())
     }
 
-    pub async fn update_collection_time(&self) -> Result<(), sqlx::Error> {
-        sqlx::query!("UPDATE collection_state SET last_collection_at = NOW() WHERE id = 1")
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ==================== Images ====================
-
-    /// Get images that need to be downloaded (pending or not_found with < 2 attempts)
     pub async fn get_images_for_download(
         &self,
         limit: i64,
+    ) -> Result<Vec<ImageForDownload>, sqlx::Error> {
+        self.get_images_for_download_batch(limit, i32::MAX).await
+    }
+    pub async fn get_images_for_download_batch(
+        &self,
+        limit: i64,
+        max_photos: i32,
     ) -> Result<Vec<ImageForDownload>, sqlx::Error> {
         sqlx::query_as!(
             ImageForDownload,
@@ -275,12 +293,12 @@ impl Repository {
             SELECT id, listing_id, image_index, source_url,
                    status AS "status: ImageStatus", download_attempts
             FROM images
-            WHERE status = 'pending'
-               OR (status = 'not_found' AND download_attempts < 2)
-            ORDER BY listing_id, image_index
+            WHERE (status = 'pending' OR (status = 'not_found' AND download_attempts < 2))
+                AND image_index < $2 AND EXISTS (SELECT 1 FROM listings l WHERE l.id = images.listing_id AND l.is_active = true)
+            ORDER BY image_index, (SELECT l.fetched_at FROM listings l WHERE l.id = images.listing_id) DESC, listing_id
             LIMIT $1
             "#,
-            limit
+            limit, max_photos
         )
         .fetch_all(&self.pool)
         .await
@@ -328,6 +346,9 @@ impl Repository {
     pub async fn get_images_for_ai_analysis(
         &self,
         limit: i64,
+        max_attempts: i32,
+        max_photos: i32,
+        listing_id: Option<i64>,
     ) -> Result<Vec<ImageForAnalysis>, sqlx::Error> {
         sqlx::query_as!(
             ImageForAnalysis,
@@ -335,11 +356,14 @@ impl Repository {
             SELECT id, listing_id, image_index, source_url, s3_key
             FROM images
             WHERE status = 'downloaded'
-              AND ai_analyzed_at IS NULL
+              AND ai_analyzed_at IS NULL AND ai_attempts < $2
+              AND (ai_retry_at IS NULL OR ai_retry_at <= NOW()) AND image_index < $3
+              AND ($4::bigint IS NULL OR listing_id = $4)
+              AND EXISTS (SELECT 1 FROM listings l WHERE l.id = images.listing_id AND l.is_active = true)
             ORDER BY listing_id, image_index
             LIMIT $1
             "#,
-            limit
+            limit, max_attempts, max_photos, listing_id
         )
         .fetch_all(&self.pool)
         .await
@@ -352,6 +376,7 @@ impl Repository {
         analysis: &ImageAnalysisResult,
         model: &str,
     ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             r#"
             UPDATE images
@@ -362,7 +387,7 @@ impl Repository {
                 ai_issues = $6,
                 ai_description = $7,
                 ai_model = $8,
-                ai_analyzed_at = NOW()
+                ai_analyzed_at = NOW(), ai_retry_at = NULL, ai_last_error = NULL
             WHERE id = $1
             "#,
             image_id,
@@ -374,8 +399,19 @@ impl Repository {
             &analysis.description,
             model
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query!(
+            r#"UPDATE listings SET analysis_condition = NULL, analysis_is_shell = NULL,
+            analysis_move_in_ready = NULL, analysis_red_flags = NULL, analysis_summary = NULL,
+            analysis_model = NULL, analyzed_at = NULL, analysis_attempts = 0,
+            analysis_retry_at = NULL, analysis_last_error = NULL
+            WHERE id = (SELECT listing_id FROM images WHERE id = $1)"#,
+            image_id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -391,7 +427,7 @@ impl Repository {
                    status AS "status: ImageStatus", s3_key, http_status,
                    download_attempts, last_error, downloaded_at, ai_image_type, ai_room,
                    ai_condition, ai_confidence, ai_issues, ai_description, ai_model,
-                   ai_analyzed_at, created_at
+                   ai_analyzed_at, ai_attempts, ai_last_error, created_at
             FROM images
             WHERE listing_id = $1
               AND ai_analyzed_at IS NOT NULL
@@ -403,50 +439,20 @@ impl Repository {
         .await
     }
 
-    /// Get listings that need second-layer analysis:
-    /// 1. All downloaded images are analyzed, OR
-    /// 2. No downloaded images exist (all failed/not_found/gone/pending)
     pub async fn get_listings_for_second_layer_analysis(
         &self,
         limit: i64,
+        max_attempts: i32,
+        max_photos: i32,
     ) -> Result<Vec<i64>, sqlx::Error> {
-        let rows = sqlx::query_scalar!(
-            r#"
-            SELECT DISTINCT l.id
-            FROM listings l
-            WHERE l.analyzed_at IS NULL
-              AND l.is_active = true
-              AND (
-                  -- Case 1: Has analyzed images and no pending analysis
-                  (
-                      EXISTS (
-                          SELECT 1 FROM images i
-                          WHERE i.listing_id = l.id
-                            AND i.ai_analyzed_at IS NOT NULL
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM images i
-                          WHERE i.listing_id = l.id
-                            AND i.status = 'downloaded'
-                            AND i.ai_analyzed_at IS NULL
-                      )
-                  )
-                  OR
-                  -- Case 2: No downloaded images at all (treat as "no photos")
-                  NOT EXISTS (
-                      SELECT 1 FROM images i
-                      WHERE i.listing_id = l.id
-                        AND i.status = 'downloaded'
-                  )
-              )
-            LIMIT $1
-            "#,
-            limit
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows)
+        sqlx::query_scalar!(r#"
+            SELECT l.id FROM listings l WHERE l.analyzed_at IS NULL AND l.is_active = true
+                AND l.analysis_attempts < $2 AND (l.analysis_retry_at IS NULL OR l.analysis_retry_at <= NOW())
+                AND NOT EXISTS (SELECT 1 FROM images i WHERE i.listing_id = l.id AND i.image_index < $3 AND (
+                    i.status = 'pending' OR (i.status = 'not_found' AND i.download_attempts < 2)
+                    OR (i.status = 'downloaded' AND i.ai_analyzed_at IS NULL AND i.ai_attempts < $2)))
+            ORDER BY l.id LIMIT $1
+            "#, limit, max_attempts, max_photos).fetch_all(&self.pool).await
     }
 
     /// Save listing-level AI analysis result
@@ -465,7 +471,7 @@ impl Repository {
                 analysis_red_flags = $5,
                 analysis_summary = $6,
                 analysis_model = $7,
-                analyzed_at = NOW()
+                analyzed_at = NOW(), analysis_retry_at = NULL, analysis_last_error = NULL
             WHERE id = $1
             "#,
             listing_id,
@@ -555,22 +561,29 @@ impl Repository {
     }
 
     /// Get paginated listings with filters
-    #[allow(clippy::too_many_arguments)]
     pub async fn get_listings_paginated(
         &self,
         offset: i64,
         limit: i64,
-        min_price: Option<i64>,
-        max_price: Option<i64>,
-        rooms: Option<i32>,
-        analyzed_only: bool,
-        hide_shell: bool,
-        active_only: bool,
-        property_type: Option<String>,
-        is_shell: Option<bool>,
-        min_condition: Option<i32>,
-        max_condition: Option<i32>,
+        filters: ListingsFilter,
     ) -> Result<(Vec<DbListing>, i64), sqlx::Error> {
+        let ListingsFilter {
+            min_price,
+            max_price,
+            rooms,
+            analyzed_only,
+            hide_shell,
+            active_only,
+            property_type,
+            is_shell,
+            min_condition,
+            max_condition,
+            min_area,
+            move_in_ready,
+            favorites_only,
+            hide_rejected,
+            verified_after,
+        } = filters;
         let listings = sqlx::query_as!(
             DbListing,
             r#"
@@ -579,19 +592,26 @@ impl Repository {
                    time_created, time_updated, fetched_at, is_active,
                    analysis_condition, analysis_is_shell, analysis_move_in_ready,
                    analysis_red_flags, analysis_summary, analysis_model,
-                   analyzed_at AS analysis_analyzed_at
+                   analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,
+                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason
             FROM listings
             WHERE ($1::bigint IS NULL OR price >= $1)
               AND ($2::bigint IS NULL OR price <= $2)
               AND ($3::int IS NULL OR rooms = $3)
-              AND ($4 = false OR analysis_condition IS NOT NULL)
+              AND ($4 = false OR analyzed_at IS NOT NULL)
               AND ($5 = false OR analysis_is_shell IS NOT TRUE)
               AND ($6 = false OR is_active = true)
               AND ($7::text IS NULL OR params->>'Вид объекта' = $7)
               AND ($8::bool IS NULL OR analysis_is_shell = $8)
               AND ($9::int IS NULL OR analysis_condition >= $9)
               AND ($10::int IS NULL OR analysis_condition <= $10)
-            ORDER BY fetched_at DESC
+              AND ($13::float8 IS NULL OR area >= $13)
+              AND ($14::bool IS NULL OR analysis_move_in_ready = $14)
+              AND ($15 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))
+              AND ($16 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))
+
+              AND ($17::timestamptz IS NULL OR (source_check_status = 'active' AND source_checked_at >= $17 AND (source_time IS NULL OR source_checked_at >= source_time)))
+            ORDER BY fetched_at DESC, id DESC
             LIMIT $11 OFFSET $12
             "#,
             min_price,
@@ -605,7 +625,7 @@ impl Repository {
             min_condition,
             max_condition,
             limit,
-            offset
+            offset, min_area, move_in_ready, favorites_only, hide_rejected, verified_after
         )
         .fetch_all(&self.pool)
         .await?;
@@ -616,13 +636,19 @@ impl Repository {
             WHERE ($1::bigint IS NULL OR price >= $1)
               AND ($2::bigint IS NULL OR price <= $2)
               AND ($3::int IS NULL OR rooms = $3)
-              AND ($4 = false OR analysis_condition IS NOT NULL)
+              AND ($4 = false OR analyzed_at IS NOT NULL)
               AND ($5 = false OR analysis_is_shell IS NOT TRUE)
               AND ($6 = false OR is_active = true)
               AND ($7::text IS NULL OR params->>'Вид объекта' = $7)
               AND ($8::bool IS NULL OR analysis_is_shell = $8)
               AND ($9::int IS NULL OR analysis_condition >= $9)
               AND ($10::int IS NULL OR analysis_condition <= $10)
+              AND ($11::float8 IS NULL OR area >= $11)
+              AND ($12::bool IS NULL OR analysis_move_in_ready = $12)
+              AND ($13 = false OR EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.favorite))
+              AND ($14 = false OR NOT EXISTS (SELECT 1 FROM listing_reviews r WHERE r.listing_id = listings.id AND r.hidden))
+
+              AND ($15::timestamptz IS NULL OR (source_check_status = 'active' AND source_checked_at >= $15 AND (source_time IS NULL OR source_checked_at >= source_time)))
             "#,
             min_price,
             max_price,
@@ -633,7 +659,7 @@ impl Repository {
             property_type.as_deref(),
             is_shell,
             min_condition,
-            max_condition
+            max_condition, min_area, move_in_ready, favorites_only, hide_rejected, verified_after
         )
         .fetch_one(&self.pool)
         .await?;
@@ -651,7 +677,8 @@ impl Repository {
                    time_created, time_updated, fetched_at, is_active,
                    analysis_condition, analysis_is_shell, analysis_move_in_ready,
                    analysis_red_flags, analysis_summary, analysis_model,
-                   analyzed_at AS analysis_analyzed_at
+                   analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,
+                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason
             FROM listings WHERE id = $1
             "#,
             id
@@ -672,7 +699,7 @@ impl Repository {
                    status AS "status: ImageStatus", s3_key, http_status,
                    download_attempts, last_error, downloaded_at, ai_image_type, ai_room,
                    ai_condition, ai_confidence, ai_issues, ai_description, ai_model,
-                   ai_analyzed_at, created_at
+                   ai_analyzed_at, ai_attempts, ai_last_error, created_at
             FROM images
             WHERE listing_id = $1
             ORDER BY image_index
@@ -681,6 +708,151 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await
+    }
+    pub async fn begin_image_attempt(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query!("UPDATE images SET ai_attempts = ai_attempts + 1, ai_retry_at = NOW() + INTERVAL '5 minutes' WHERE id = $1", id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn fail_image_analysis(&self, id: i64, error: &str) -> Result<(), sqlx::Error> {
+        sqlx::query!("UPDATE images SET ai_last_error = $2, ai_retry_at = NOW() + INTERVAL '1 minute' * power(2, LEAST(ai_attempts, 6)) WHERE id = $1", id, error)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn begin_listing_attempt(&self, id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query!("UPDATE listings SET analysis_attempts = analysis_attempts + 1, analysis_retry_at = NOW() + INTERVAL '5 minutes' WHERE id = $1", id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn fail_listing_analysis(&self, id: i64, error: &str) -> Result<(), sqlx::Error> {
+        sqlx::query!("UPDATE listings SET analysis_last_error = $2, analysis_retry_at = NOW() + INTERVAL '1 minute' * power(2, LEAST(analysis_attempts, 6)) WHERE id = $1", id, error)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn reset_analysis(&self, listing_id: i64, images: bool) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!("UPDATE listings SET analysis_condition = NULL, analysis_is_shell = NULL, analysis_move_in_ready = NULL, analysis_red_flags = NULL, analysis_summary = NULL, analysis_model = NULL, analyzed_at = NULL, analysis_attempts = 0, analysis_retry_at = NULL, analysis_last_error = NULL WHERE id = $1", listing_id)
+            .execute(&mut *tx).await?;
+        if images {
+            sqlx::query!("UPDATE images SET ai_image_type = NULL, ai_room = NULL, ai_condition = NULL, ai_confidence = NULL, ai_issues = NULL, ai_description = NULL, ai_model = NULL, ai_analyzed_at = NULL, ai_attempts = 0, ai_retry_at = NULL, ai_last_error = NULL WHERE listing_id = $1", listing_id)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn apply_actuality(
+        &self,
+        id: i64,
+        active: bool,
+        checked_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query!(r#"UPDATE listings SET is_active = $2, actuality_checked_at = $3, actuality_origin = 'check_feed'
+            WHERE id = $1 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) AND (source_time IS NULL OR source_time <= $3)"#, id, active, checked_at)
+            .execute(&self.pool).await?.rows_affected() > 0)
+    }
+
+    pub async fn update_sync_checkpoint(
+        &self,
+        through: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            "UPDATE collection_state SET last_sync_at = $1 WHERE id = 1",
+            through
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_source_check(
+        &self,
+        id: i64,
+        check: &crate::actuality::SourceCheck,
+    ) -> Result<(), sqlx::Error> {
+        let definitive = check.status != crate::actuality::SourceStatus::Unknown;
+        let active = check.status == crate::actuality::SourceStatus::Active;
+        sqlx::query!(r#"UPDATE listings SET source_check_status = $2, source_checked_at = $3,
+            source_check_http_status = $4, source_check_reason = $5,
+            is_active = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $7 ELSE is_active END,
+            actuality_checked_at = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN $3 ELSE actuality_checked_at END,
+            actuality_origin = CASE WHEN $6 AND (actuality_checked_at IS NULL OR actuality_checked_at <= $3) THEN 'source_page' ELSE actuality_origin END
+            WHERE id = $1 AND (source_time IS NULL OR source_time <= $3)
+                AND (source_checked_at IS NULL OR source_checked_at <= $3)"#,
+            id, check.status.as_str(), check.checked_at, check.http_status, &check.reason, definitive, active)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+    pub async fn get_source_check_queue(
+        &self,
+        limit: i64,
+        recheck_hours: i32,
+    ) -> Result<Vec<i64>, sqlx::Error> {
+        sqlx::query_scalar!(
+            r#"SELECT id FROM listings WHERE is_active = true
+            AND (source_checked_at IS NULL OR source_checked_at < NOW() - INTERVAL '1 hour' * $2::int
+                OR source_time > source_checked_at)
+            ORDER BY source_checked_at NULLS FIRST, fetched_at DESC, id DESC LIMIT $1"#,
+            limit,
+            recheck_hours
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn get_listing_ids(&self) -> Result<Vec<i64>, sqlx::Error> {
+        sqlx::query_scalar!("SELECT id FROM listings ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    pub async fn get_image_by_id(&self, id: i64) -> Result<Option<String>, sqlx::Error> {
+        Ok(sqlx::query_scalar!(
+            "SELECT s3_key FROM images WHERE id = $1 AND status = 'downloaded'",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
+    pub async fn get_review(&self, id: i64) -> Result<super::models::ListingReview, sqlx::Error> {
+        Ok(sqlx::query_as!(
+            super::models::ListingReview,
+            "SELECT favorite, hidden, stage, notes FROM listing_reviews WHERE listing_id = $1",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or_else(|| super::models::ListingReview {
+            stage: "new".to_owned(),
+            ..Default::default()
+        }))
+    }
+
+    pub async fn save_review(
+        &self,
+        id: i64,
+        review: &super::models::ListingReview,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(r#"INSERT INTO listing_reviews (listing_id, favorite, hidden, stage, notes) VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (listing_id) DO UPDATE SET favorite = EXCLUDED.favorite, hidden = EXCLUDED.hidden,
+                stage = EXCLUDED.stage, notes = EXCLUDED.notes"#, id, review.favorite, review.hidden, &review.stage, &review.notes)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn get_price_history(&self, id: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        let rows = sqlx::query!("SELECT observed_at, price FROM listing_price_history WHERE listing_id = $1 ORDER BY observed_at DESC", id)
+            .fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| serde_json::json!({"observed_at": row.observed_at, "price": row.price}))
+            .collect())
     }
 }
 
@@ -700,4 +872,23 @@ pub struct AnalysisStats {
     pub images_pending: i64,
     pub listings_analyzed: i64,
     pub listings_pending: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct ListingsFilter {
+    pub min_price: Option<i64>,
+    pub max_price: Option<i64>,
+    pub rooms: Option<i32>,
+    pub analyzed_only: bool,
+    pub hide_shell: bool,
+    pub active_only: bool,
+    pub property_type: Option<String>,
+    pub is_shell: Option<bool>,
+    pub min_condition: Option<i32>,
+    pub max_condition: Option<i32>,
+    pub min_area: Option<f64>,
+    pub move_in_ready: Option<bool>,
+    pub favorites_only: bool,
+    pub hide_rejected: bool,
+    pub verified_after: Option<chrono::DateTime<chrono::Utc>>,
 }

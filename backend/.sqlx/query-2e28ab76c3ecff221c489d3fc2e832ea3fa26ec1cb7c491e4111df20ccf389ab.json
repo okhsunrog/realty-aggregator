@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT favorite, hidden, stage, notes FROM listing_reviews WHERE listing_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "favorite",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "hidden",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "notes",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2e28ab76c3ecff221c489d3fc2e832ea3fa26ec1cb7c491e4111df20ccf389ab"
+}

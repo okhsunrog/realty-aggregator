@@ -1,15 +1,75 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub server: ServerConfig,
     pub api: ApiConfig,
+    #[serde(default)]
+    pub actuality: ActualityConfig,
     pub storage: StorageConfig,
     pub vision: VisionConfig,
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ServerConfig {
+    #[serde(default = "default_frontend_dir")]
+    pub frontend_dir: Option<std::path::PathBuf>,
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    #[serde(default = "default_origins")]
+    pub allowed_origins: Vec<String>,
+}
+fn default_frontend_dir() -> Option<std::path::PathBuf> {
+    Some("../frontend/dist".into())
+}
+fn default_bind() -> String {
+    "127.0.0.1:3000".to_owned()
+}
+fn default_origins() -> Vec<String> {
+    vec![
+        "http://localhost:5173".to_owned(),
+        "http://127.0.0.1:5173".to_owned(),
+        "http://localhost:3000".to_owned(),
+        "http://127.0.0.1:3000".to_owned(),
+    ]
+}
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            frontend_dir: default_frontend_dir(),
+            bind: default_bind(),
+            allowed_origins: default_origins(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ActualityConfig {
+    pub enabled: bool,
+    pub interval_minutes: u32,
+    pub batch_size: u32,
+    pub recheck_hours: i32,
+    pub request_delay_seconds: u64,
+}
+impl Default for ActualityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_minutes: 60,
+            batch_size: 20,
+            recheck_hours: 24,
+            request_delay_seconds: 10,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ApiConfig {
+    #[serde(default = "default_download_limit")]
+    pub max_downloads_per_run: u32,
     /// Collection interval in minutes
     #[serde(default = "default_collect_interval")]
     pub collect_interval_minutes: u32,
@@ -30,8 +90,12 @@ pub struct ApiConfig {
     pub query: ApiQueryConfig,
 }
 
+fn default_download_limit() -> u32 {
+    100
+}
+
 fn default_initial_load_days() -> u32 {
-    30
+    90
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +134,7 @@ fn default_request_delay() -> u32 {
     6
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiQueryConfig {
     /// Category ID (2 = apartments)
     pub category_id: i32,
@@ -127,6 +191,8 @@ fn default_image_path_template() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct VisionConfig {
+    #[serde(default = "default_allowed_models")]
+    pub allowed_models: Vec<String>,
     /// OpenAI-compatible API base URL, including /v1.
     #[serde(default = "default_vision_api_base_url")]
     pub api_base_url: String,
@@ -156,6 +222,10 @@ pub struct VisionConfig {
     pub filter: VisionFilterConfig,
 }
 
+fn default_allowed_models() -> Vec<String> {
+    vec![default_image_model()]
+}
+
 fn default_image_model() -> String {
     "gpt-6-luna".to_string()
 }
@@ -176,7 +246,7 @@ fn default_max_retries() -> u32 {
     3
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct VisionFilterConfig {
     /// Enable filtering
     #[serde(default = "default_filter_enabled")]
@@ -215,6 +285,22 @@ pub struct VisionFilterConfig {
     pub require_coords: bool,
 }
 
+impl Default for VisionFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_filter_enabled(),
+            min_photos: default_min_photos(),
+            max_photos: None,
+            min_price: None,
+            max_price: None,
+            min_area: None,
+            max_area: None,
+            sources: None,
+            require_coords: false,
+        }
+    }
+}
+
 fn default_filter_enabled() -> bool {
     true
 }
@@ -229,7 +315,33 @@ impl Config {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ConfigError::FileRead(e.to_string()))?;
 
-        toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
+        let config: Self =
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        if config.actuality.interval_minutes == 0
+            || !(1..=100).contains(&config.actuality.batch_size)
+            || !(1..=720).contains(&config.actuality.recheck_hours)
+            || config.actuality.request_delay_seconds < 5
+            || !(1..=1000).contains(&config.api.max_downloads_per_run)
+            || config.api.collect_interval_minutes == 0
+            || config.api.sync.interval_hours == 0
+            || config.api.request_delay_seconds < 5
+            || config.api.initial_load_days == 0
+            || !(1..=10).contains(&config.vision.max_retries)
+            || config.vision.filter.max_photos == Some(0)
+            || !config
+                .vision
+                .allowed_models
+                .contains(&config.vision.image_model)
+            || !config
+                .vision
+                .allowed_models
+                .contains(&config.vision.listing_model)
+        {
+            return Err(ConfigError::Parse(
+                "Invalid intervals, attempt limits or allowed models".to_owned(),
+            ));
+        }
+        Ok(config)
     }
 
     /// Load from default path (config.toml)

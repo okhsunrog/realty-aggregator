@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO listing_price_history (listing_id, observed_at, price)\n                    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6bb399f0aa2fc56d9be7809ffec310809d311b7f5063e6d47fb195dcf12362c0"
+}

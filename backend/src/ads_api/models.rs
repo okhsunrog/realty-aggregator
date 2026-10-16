@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct ApiResponse {
     pub code: i32,
     pub data: Option<Vec<Listing>>,
+    #[serde(alias = "error")]
     pub message: Option<String>,
 }
 
@@ -108,6 +109,7 @@ pub struct ListingsQuery {
 pub struct SingleListingResponse {
     pub code: i32,
     pub data: Option<Listing>,
+    #[serde(alias = "error")]
     pub message: Option<String>,
 }
 
@@ -115,6 +117,7 @@ pub struct SingleListingResponse {
 pub struct CategoryParamsResponse {
     pub code: i32,
     pub data: Option<Vec<CategoryParam>>,
+    #[serde(alias = "error")]
     pub message: Option<String>,
 }
 
@@ -135,6 +138,7 @@ pub struct ParamValue {
 pub struct CheckFeedResponse {
     pub code: i32,
     pub data: Option<Vec<CheckFeedItem>>,
+    #[serde(alias = "error")]
     pub message: Option<String>,
 }
 
@@ -149,6 +153,8 @@ pub struct CheckFeedItem {
 
 #[derive(Debug, Serialize, Default)]
 pub struct CheckFeedQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
     pub user: String,
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]

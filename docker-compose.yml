@@ -2,12 +2,13 @@ services:
   postgres:
     image: postgres:17
     container_name: realty-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: realty
       POSTGRES_PASSWORD: realty_dev_password
       POSTGRES_DB: realty
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,15 +18,16 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    image: realty-minio:7aac2a2c5b7c
     container_name: realty-minio
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: realty
       MINIO_ROOT_PASSWORD: realty_dev_password
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web Console
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # Web Console
     volumes:
       - minio_data:/data
     healthcheck:
@@ -34,20 +36,20 @@ services:
       timeout: 5s
       retries: 5
 
-  # Backend service - runs pre-built binary from host
-  # Build locally first: cd backend && cargo build --release
-  #
-  # Usage examples:
-  #   Run main server:           docker compose --profile backend up backend
-  #   Run with custom binary:    BACKEND_BIN=test_actuality BACKEND_ARGS="--limit 50" docker compose --profile backend up backend
+  # Optional container backend; native user service is recommended for this host.
+  # docker compose --profile backend up --build backend
   backend:
-    image: ubuntu:24.04
+    image: realty-backend:local
+    build:
+      context: .
+      dockerfile: deploy/backend.Dockerfile
     container_name: realty-backend
     working_dir: /app
-    command: ["sh", "-c", "apt-get update -qq && apt-get install -qq -y ca-certificates > /dev/null && ./bin/${BACKEND_BIN:-backend} ${BACKEND_ARGS:-}"]
+    command: ["sh", "-c", "exec ./bin/${BACKEND_BIN:-backend} ${BACKEND_ARGS:-}"]
     environment:
-      - DATABASE_URL=postgres://realty:realty_dev_password@postgres:5432/realty
-      - MINIO_ENDPOINT=http://minio:9000
+      - SERVER_BIND=127.0.0.1:3000
+      - DATABASE_URL=postgres://realty:realty_dev_password@127.0.0.1:5432/realty
+      - MINIO_ENDPOINT=http://127.0.0.1:9000
       - MINIO_ACCESS_KEY=realty
       - MINIO_SECRET_KEY=realty_dev_password
       - MINIO_BUCKET=realty-images
@@ -57,11 +59,9 @@ services:
       - BACKEND_ARGS=${BACKEND_ARGS:-}
     env_file:
       - backend/.env
-    ports:
-      - "3000:3000"
+    network_mode: host
     volumes:
-      - ./backend:/app
-      - /home/okhsunrog/tmp_zfs/rust_build/release:/app/bin:ro
+      - ./backend/config.toml:/app/config.toml:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE collection_state SET last_collection_at = $1, query_fingerprint = $2 WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5faf8f76bcdcfe4211b34a1b9eadb8be43af95038b789a0a0accf24fd633efab"
+}

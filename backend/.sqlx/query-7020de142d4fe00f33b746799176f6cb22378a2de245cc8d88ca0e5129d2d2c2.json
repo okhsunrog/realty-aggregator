@@ -1,0 +1,39 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT price, (title, description, price, area, rooms, floor, floors_total, address, params, lat, lng)\n                IS DISTINCT FROM ($2::text, $3::text, $4::bigint, $5::float8, $6::int,\n                    $7::int, $8::int, $9::text, $10::jsonb, $11::float8, $12::float8) AS \"changed!\"\n            FROM listings WHERE id = $1 FOR UPDATE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "price",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "changed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int8",
+        "Float8",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Jsonb",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "7020de142d4fe00f33b746799176f6cb22378a2de245cc8d88ca0e5129d2d2c2"
+}

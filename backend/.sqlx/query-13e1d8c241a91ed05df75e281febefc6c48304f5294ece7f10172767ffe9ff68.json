@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE images SET ai_image_type = NULL, ai_room = NULL, ai_condition = NULL, ai_confidence = NULL, ai_issues = NULL, ai_description = NULL, ai_model = NULL, ai_analyzed_at = NULL, ai_attempts = 0, ai_retry_at = NULL, ai_last_error = NULL WHERE listing_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13e1d8c241a91ed05df75e281febefc6c48304f5294ece7f10172767ffe9ff68"
+}

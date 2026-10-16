@@ -1,12 +1,12 @@
 use base64::Engine;
 use reqwest::Client;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::client::{OpenAiClient, OpenAiError};
 use crate::db::ImageAnalysisResult;
 
-const IMAGE_ANALYSIS_PROMPT: &str = r#"Analyze this apartment photo. JSON only, no markdown.
+const IMAGE_ANALYSIS_PROMPT: &str = r#"Analyze this apartment photo. JSON only, no markdown. Write issues and description in Russian; keep enum values in English.
 
 {
   "image_type": "interior|exterior|floor_plan|other",
@@ -82,13 +82,19 @@ impl ImageAnalyzer {
     }
 
     /// Analyze a single image from URL
-    pub async fn analyze_from_url(&self, image_url: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
+    pub async fn analyze_from_url(
+        &self,
+        image_url: &str,
+    ) -> Result<ImageAnalysisResult, AnalyzerError> {
         let image_base64 = self.download_image(image_url).await?;
         self.analyze_base64(&image_base64).await
     }
 
     /// Analyze a single image from base64
-    pub async fn analyze_base64(&self, image_base64: &str) -> Result<ImageAnalysisResult, AnalyzerError> {
+    pub async fn analyze_base64(
+        &self,
+        image_base64: &str,
+    ) -> Result<ImageAnalysisResult, AnalyzerError> {
         debug!("Sending image to OpenAI-compatible API for analysis");
 
         let response = self
@@ -138,69 +144,36 @@ impl ImageAnalyzer {
             .trim_end_matches("```")
             .trim();
 
-        // Parse as raw JSON first for flexibility
-        let raw: serde_json::Value = serde_json::from_str(json_str)
-            .map_err(|e| AnalyzerError::ParseError(format!("Invalid JSON: {} - Response: {}", e, json_str)))?;
-
-        let obj = raw
-            .as_object()
-            .ok_or_else(|| AnalyzerError::ParseError("Response is not an object".to_string()))?;
-
-        // Extract fields with defaults
-        let image_type = obj
-            .get("image_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("other")
-            .to_string();
-
-        let room = obj
-            .get("room")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str().map(|s| s.to_string())
-                }
-            });
-
-        let condition = obj
-            .get("condition")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_i64().map(|n| n as i32)
-                }
-            });
-
-        let confidence = obj
-            .get("confidence")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(50) as i32;
-
-        let issues: Vec<String> = obj
-            .get("issues")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
+        let raw: serde_json::Value =
+            serde_json::from_str(json_str).map_err(|e| AnalyzerError::ParseError(e.to_string()))?;
+        for field in [
+            "image_type",
+            "room",
+            "condition",
+            "confidence",
+            "issues",
+            "description",
+        ] {
+            if raw.get(field).is_none() {
+                return Err(AnalyzerError::ParseError(format!("Missing {field}")));
+            }
+        }
+        let result: ImageAnalysisResult =
+            serde_json::from_value(raw).map_err(|e| AnalyzerError::ParseError(e.to_string()))?;
+        if !["interior", "exterior", "floor_plan", "other"].contains(&result.image_type.as_str())
+            || !(0..=100).contains(&result.confidence)
+            || result.condition.is_some_and(|n| !(0..=100).contains(&n))
+            || (result.image_type != "interior"
+                && (result.condition.is_some() || result.room.is_some()))
+            || result.room.as_deref().is_some_and(|r| {
+                !["bathroom", "kitchen", "living", "bedroom", "hallway"].contains(&r)
             })
-            .unwrap_or_default();
-
-        let description = obj
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("No description")
-            .to_string();
-
-        Ok(ImageAnalysisResult {
-            image_type,
-            room,
-            condition,
-            confidence,
-            issues,
-            description,
-        })
+            || result.description.trim().is_empty()
+        {
+            return Err(AnalyzerError::ParseError(
+                "Invalid image analysis fields".to_owned(),
+            ));
+        }
+        Ok(result)
     }
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, source, url, title, description, price, city, address,\n                   lat, lng, rooms, area, floor, floors_total, person_type, params,\n                   time_created, time_updated, fetched_at, is_active,\n                   analysis_condition, analysis_is_shell, analysis_move_in_ready,\n                   analysis_red_flags, analysis_summary, analysis_model,\n                   analyzed_at AS analysis_analyzed_at\n            FROM listings WHERE id = $1\n            ",
+  "query": "\n            SELECT id, source, url, title, description, price, city, address,\n                   lat, lng, rooms, area, floor, floors_total, person_type, params,\n                   time_created, time_updated, fetched_at, is_active,\n                   analysis_condition, analysis_is_shell, analysis_move_in_ready,\n                   analysis_red_flags, analysis_summary, analysis_model,\n                   analyzed_at AS analysis_analyzed_at, source_time, analysis_attempts, analysis_last_error,\n                   actuality_checked_at, actuality_origin, source_check_status, source_checked_at, source_check_http_status, source_check_reason\n            FROM listings WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,51 @@
         "ordinal": 26,
         "name": "analysis_analyzed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 27,
+        "name": "source_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 28,
+        "name": "analysis_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 29,
+        "name": "analysis_last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 30,
+        "name": "actuality_checked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 31,
+        "name": "actuality_origin",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 32,
+        "name": "source_check_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 33,
+        "name": "source_checked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 34,
+        "name": "source_check_http_status",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 35,
+        "name": "source_check_reason",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -171,8 +216,17 @@
       true,
       true,
       true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "1b57d83a7451211c14cdff0a820c536e71725f12a8e1d9406ec0be737b9bbc97"
+  "hash": "e87a72b8ac7b94de987690fe63cd2109408f89d4e686dc94e6f70861f39826e7"
 }

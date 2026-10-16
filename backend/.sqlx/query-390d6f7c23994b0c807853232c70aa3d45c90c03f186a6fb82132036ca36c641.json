@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET is_active = false, actuality_checked_at = NOW(), actuality_origin = 'manual' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "390d6f7c23994b0c807853232c70aa3d45c90c03f186a6fb82132036ca36c641"
+}

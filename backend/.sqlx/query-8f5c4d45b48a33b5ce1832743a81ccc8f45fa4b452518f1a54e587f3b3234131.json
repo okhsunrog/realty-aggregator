@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO images (listing_id, image_index, source_url) VALUES ($1,$2,$3)\n                    ON CONFLICT (listing_id, image_index) DO UPDATE SET source_url = EXCLUDED.source_url,\n                        status = 'pending', s3_key = NULL, downloaded_at = NULL, http_status = NULL,\n                        download_attempts = 0, last_error = NULL, ai_image_type = NULL, ai_room = NULL,\n                        ai_condition = NULL, ai_confidence = NULL, ai_issues = NULL, ai_description = NULL,\n                        ai_model = NULL, ai_analyzed_at = NULL, ai_attempts = 0, ai_retry_at = NULL, ai_last_error = NULL\n                    WHERE images.source_url IS DISTINCT FROM EXCLUDED.source_url\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8f5c4d45b48a33b5ce1832743a81ccc8f45fa4b452518f1a54e587f3b3234131"
+}

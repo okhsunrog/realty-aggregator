@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM images WHERE listing_id = $1 AND image_index >= $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5099039ad7cd5f9b89f3cdbb2baed7a9424c175dde1d54b4cd91e5462d7be6cd"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT l.id FROM listings l WHERE l.analyzed_at IS NULL AND l.is_active = true\n                AND l.analysis_attempts < $2 AND (l.analysis_retry_at IS NULL OR l.analysis_retry_at <= NOW())\n                AND NOT EXISTS (SELECT 1 FROM images i WHERE i.listing_id = l.id AND i.image_index < $3 AND (\n                    i.status = 'pending' OR (i.status = 'not_found' AND i.download_attempts < 2)\n                    OR (i.status = 'downloaded' AND i.ai_analyzed_at IS NULL AND i.ai_attempts < $2)))\n            ORDER BY l.id LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43d579bf9fe0afbb3e0d1ac6a5429d998602652d70997fa969950e9754c49b16"
+}

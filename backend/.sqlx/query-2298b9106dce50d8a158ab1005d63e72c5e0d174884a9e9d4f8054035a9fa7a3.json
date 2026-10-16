@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", s3_key, http_status,\n                   download_attempts, last_error, downloaded_at, ai_image_type, ai_room,\n                   ai_condition, ai_confidence, ai_issues, ai_description, ai_model,\n                   ai_analyzed_at, created_at\n            FROM images\n            WHERE listing_id = $1\n            ORDER BY image_index\n            ",
+  "query": "\n            SELECT id, listing_id, image_index, source_url,\n                   status AS \"status: ImageStatus\", s3_key, http_status,\n                   download_attempts, last_error, downloaded_at, ai_image_type, ai_room,\n                   ai_condition, ai_confidence, ai_issues, ai_description, ai_model,\n                   ai_analyzed_at, ai_attempts, ai_last_error, created_at\n            FROM images\n            WHERE listing_id = $1\n              AND ai_analyzed_at IS NOT NULL\n            ORDER BY image_index\n            ",
   "describe": {
     "columns": [
       {
@@ -108,6 +108,16 @@
       },
       {
         "ordinal": 18,
+        "name": "ai_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "ai_last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 20,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -136,8 +146,10 @@
       true,
       true,
       true,
+      false,
+      true,
       true
     ]
   },
-  "hash": "5f84a70e62f7c5cc1a47af053f12b5bc0c4afa0047b4edb141790d9f940d4dcd"
+  "hash": "2298b9106dce50d8a158ab1005d63e72c5e0d174884a9e9d4f8054035a9fa7a3"
 }

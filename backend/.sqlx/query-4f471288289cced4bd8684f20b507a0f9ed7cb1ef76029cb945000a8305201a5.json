@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE listings SET analysis_condition = NULL, analysis_is_shell = NULL,\n            analysis_move_in_ready = NULL, analysis_red_flags = NULL, analysis_summary = NULL,\n            analysis_model = NULL, analyzed_at = NULL, analysis_attempts = 0,\n            analysis_retry_at = NULL, analysis_last_error = NULL\n            WHERE id = (SELECT listing_id FROM images WHERE id = $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f471288289cced4bd8684f20b507a0f9ed7cb1ef76029cb945000a8305201a5"
+}

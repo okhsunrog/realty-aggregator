@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM listings WHERE is_active = true",
+  "query": "SELECT id FROM listings ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "98921b0e1d22a1a12e63766c21a6dc05160b2868cc826a9c33e9f657ad315c68"
+  "hash": "7286b76a95fa404f6cfaf7318dd36490884e5b0fd3c0050c15a0210ca50153e7"
 }

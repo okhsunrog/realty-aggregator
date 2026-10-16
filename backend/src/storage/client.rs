@@ -89,7 +89,7 @@ impl StorageClient {
             .map_err(|e| StorageError::S3Error(e.to_string()))?
             .with_path_style();
 
-        let http_client = HttpClient::builder()
+        let http_client = crate::network::source_client_builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -128,7 +128,7 @@ impl StorageClient {
     }
 
     /// Generate image path from template
-    fn image_path(&self, listing_id: i64, index: i32) -> String {
+    pub fn image_path(&self, listing_id: i64, index: i32) -> String {
         self.image_path_template
             .replace("{listing_id}", &listing_id.to_string())
             .replace("{index}", &index.to_string())
@@ -208,6 +208,17 @@ impl StorageClient {
         }
     }
 
+    pub async fn put_image_by_key(&self, key: &str, bytes: &[u8]) -> Result<(), StorageError> {
+        let response = self.bucket.put_object(key, bytes).await?;
+        if !(200..300).contains(&response.status_code()) {
+            return Err(StorageError::HttpError {
+                status: response.status_code(),
+                message: "Object upload failed".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Get image from storage
     pub async fn get_image(&self, listing_id: i64, index: i32) -> Result<Vec<u8>, StorageError> {
         let path = self.image_path(listing_id, index);
@@ -217,6 +228,12 @@ impl StorageClient {
             return Err(StorageError::NotFound(path));
         }
 
+        if !(200..300).contains(&response.status_code()) {
+            return Err(StorageError::HttpError {
+                status: response.status_code(),
+                message: "Object storage read failed".to_owned(),
+            });
+        }
         Ok(response.to_vec())
     }
 
@@ -228,6 +245,12 @@ impl StorageClient {
             return Err(StorageError::NotFound(s3_key.to_string()));
         }
 
+        if !(200..300).contains(&response.status_code()) {
+            return Err(StorageError::HttpError {
+                status: response.status_code(),
+                message: "Object storage read failed".to_owned(),
+            });
+        }
         Ok(response.to_vec())
     }
 

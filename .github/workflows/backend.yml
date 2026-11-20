@@ -37,7 +37,7 @@ jobs:
       DATABASE_URL: postgres://realty_check:realty_check@localhost:5432/realty_check
       SQLX_OFFLINE: 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Check all targets using committed metadata
         run: cargo check --all-targets --locked

@@ -5,8 +5,10 @@ use sqlx::FromRow;
 /// Image download status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "image_status", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ImageStatus {
     /// Waiting to be downloaded
+    #[default]
     Pending,
     /// Successfully downloaded to S3
     Downloaded,
@@ -16,12 +18,6 @@ pub enum ImageStatus {
     Gone,
     /// Failed after max retries
     Failed,
-}
-
-impl Default for ImageStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]

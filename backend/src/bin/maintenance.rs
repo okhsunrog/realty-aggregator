@@ -199,42 +199,41 @@ async fn main() -> anyhow::Result<()> {
                         image.ai_confidence,
                         &image.ai_description,
                         &image.ai_model,
-                    ) {
-                        if image.ai_analyzed_at.is_some() {
-                            repository
-                                .save_image_analysis(
-                                    target.id,
-                                    &backend::db::ImageAnalysisResult {
-                                        image_type: kind.clone(),
-                                        room: image.ai_room.clone(),
-                                        condition: image.ai_condition,
-                                        confidence,
-                                        description: description.clone(),
-                                        issues: image.ai_issues.clone().unwrap_or_default(),
-                                    },
-                                    model,
-                                )
-                                .await?;
-                        }
+                    ) && image.ai_analyzed_at.is_some()
+                    {
+                        repository
+                            .save_image_analysis(
+                                target.id,
+                                &backend::db::ImageAnalysisResult {
+                                    image_type: kind.clone(),
+                                    room: image.ai_room.clone(),
+                                    condition: image.ai_condition,
+                                    confidence,
+                                    description: description.clone(),
+                                    issues: image.ai_issues.clone().unwrap_or_default(),
+                                },
+                                model,
+                            )
+                            .await?;
                     }
                 }
             }
-            if let (Some(summary), Some(model)) = (&l.analysis_summary, &l.analysis_model) {
-                if l.analysis_analyzed_at.is_some() {
-                    repository
-                        .save_listing_analysis(
-                            l.id,
-                            &backend::db::ListingAnalysisResult {
-                                overall_condition: l.analysis_condition,
-                                is_shell: l.analysis_is_shell,
-                                move_in_ready: l.analysis_move_in_ready,
-                                red_flags: l.analysis_red_flags.clone().unwrap_or_default(),
-                                summary: summary.clone(),
-                            },
-                            model,
-                        )
-                        .await?;
-                }
+            if let (Some(summary), Some(model)) = (&l.analysis_summary, &l.analysis_model)
+                && l.analysis_analyzed_at.is_some()
+            {
+                repository
+                    .save_listing_analysis(
+                        l.id,
+                        &backend::db::ListingAnalysisResult {
+                            overall_condition: l.analysis_condition,
+                            is_shell: l.analysis_is_shell,
+                            move_in_ready: l.analysis_move_in_ready,
+                            red_flags: l.analysis_red_flags.clone().unwrap_or_default(),
+                            summary: summary.clone(),
+                        },
+                        model,
+                    )
+                    .await?;
             }
             if let (Some(status), Some(checked_at)) = (&l.source_check_status, l.source_checked_at)
             {

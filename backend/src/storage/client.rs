@@ -41,7 +41,7 @@ pub struct DownloadResult {
     pub success: bool,
 }
 
-/// Client for MinIO (S3-compatible storage)
+/// Client for S3-compatible object storage
 pub struct StorageClient {
     bucket: Box<Bucket>,
     http_client: HttpClient,
@@ -52,13 +52,13 @@ impl StorageClient {
     /// Create client from environment variables
     pub fn from_env(image_path_template: String) -> Result<Self, StorageError> {
         let endpoint =
-            std::env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
-        let access_key = std::env::var("MINIO_ACCESS_KEY")
-            .map_err(|_| StorageError::ConfigError("MINIO_ACCESS_KEY not set".to_string()))?;
-        let secret_key = std::env::var("MINIO_SECRET_KEY")
-            .map_err(|_| StorageError::ConfigError("MINIO_SECRET_KEY not set".to_string()))?;
-        let bucket_name = std::env::var("MINIO_BUCKET")
-            .map_err(|_| StorageError::ConfigError("MINIO_BUCKET not set".to_string()))?;
+            std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".to_string());
+        let access_key = std::env::var("S3_ACCESS_KEY")
+            .map_err(|_| StorageError::ConfigError("S3_ACCESS_KEY not set".to_string()))?;
+        let secret_key = std::env::var("S3_SECRET_KEY")
+            .map_err(|_| StorageError::ConfigError("S3_SECRET_KEY not set".to_string()))?;
+        let bucket_name = std::env::var("S3_BUCKET")
+            .map_err(|_| StorageError::ConfigError("S3_BUCKET not set".to_string()))?;
 
         Self::new(
             &endpoint,

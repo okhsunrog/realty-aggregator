@@ -48,7 +48,7 @@ area_from = 33
 # withcoords = 1           # Only with coordinates
 
 [storage]
-# Image path template in MinIO
+# Object key template in the S3 bucket
 # Available variables: {listing_id}, {index}
 image_path_template = "{listing_id}/{index}.jpg"
 
@@ -82,7 +82,6 @@ min_photos = 1
 max_photos = 8
 
 # Optional filters (uncomment if needed)
-# max_photos = 20           # Max photos to analyze (rest ignored)
 # min_price = 1000000       # Minimum price
 # max_price = 50000000      # Maximum price
 # min_area = 20.0           # Minimum area (m²)

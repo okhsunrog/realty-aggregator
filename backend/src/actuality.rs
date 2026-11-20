@@ -257,14 +257,13 @@ fn classify(http: StatusCode, url: &Url, body: &str) -> SourceCheck {
     if matches!(
         url.host_str(),
         Some("youla.ru" | "www.youla.ru" | "youla.io" | "www.youla.io")
-    ) {
-        if let Some(status) = youla_status(&document, url) {
-            return SourceCheck::new(
-                status,
-                Some(http.as_u16()),
-                "Состояние исходной карточки Юлы",
-            );
-        }
+    ) && let Some(status) = youla_status(&document, url)
+    {
+        return SourceCheck::new(
+            status,
+            Some(http.as_u16()),
+            "Состояние исходной карточки Юлы",
+        );
     }
     let mut observations = Vec::new();
     for script in document.select(&selector("script[type='application/ld+json']")) {
@@ -402,15 +401,14 @@ fn structured_statuses(
                         })
                 })
             };
-            if identity && is_type("Offer") {
-                if let Some(availability) = object.get("availability").and_then(|v| v.as_str()) {
-                    match availability.rsplit('/').next().unwrap_or(availability) {
-                        "InStock" => found.push(SourceStatus::Active),
-                        "SoldOut" | "OutOfStock" | "Discontinued" => {
-                            found.push(SourceStatus::Inactive)
-                        }
-                        _ => {}
-                    }
+            if identity
+                && is_type("Offer")
+                && let Some(availability) = object.get("availability").and_then(|v| v.as_str())
+            {
+                match availability.rsplit('/').next().unwrap_or(availability) {
+                    "InStock" => found.push(SourceStatus::Active),
+                    "SoldOut" | "OutOfStock" | "Discontinued" => found.push(SourceStatus::Inactive),
+                    _ => {}
                 }
             }
             for (key, value) in object {

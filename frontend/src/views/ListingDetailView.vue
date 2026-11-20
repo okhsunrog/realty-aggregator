@@ -41,8 +41,8 @@ async function reparseOriginal() {
   catch (e) { message.error(e instanceof Error ? e.message : 'Не удалось отправить запрос') }
   finally { requestingReparse.value = false }
 }
-const certificate = ref<number | null>(Number(localStorage.getItem('certificateEstimate')) || 0)
-watch(certificate, value => localStorage.setItem('certificateEstimate', String(value ?? '')))
+const budget = ref<number | null>(Number(localStorage.getItem('budget')) || null)
+watch(budget, value => localStorage.setItem('budget', String(value ?? '')))
 const stageOptions = [
   { label: 'Новый вариант', value: 'new' }, { label: 'Связаться', value: 'contact' },
   { label: 'Просмотр', value: 'visit' }, { label: 'Проверка документов', value: 'documents' },
@@ -262,14 +262,13 @@ onUnmounted(() => { disposed = true; requestVersion++; analysisController?.abort
         </template>
       </n-card>
 
-      <n-card title="Сертификат и доплата">
+      <n-card title="Бюджет">
         <n-space vertical>
-          <div>Ориентировочная сумма сертификата, ₽</div>
-          <n-input-number v-model:value="certificate" :min="0" :step="10000" style="max-width: 300px" />
-          <n-alert type="info">0 ₽ — сумма, которую называли год назад. Укажите подтверждённую сумму перед выбором квартиры.</n-alert>
-          <div v-if="certificate !== null && listing.price !== null">
-            <strong v-if="listing.price > certificate">Доплата: {{ formatMoney(listing.price - certificate) }}</strong>
-            <strong v-else>Неиспользованная часть сертификата: {{ formatMoney(certificate - listing.price) }}</strong>
+          <div>Бюджет покупки, ₽</div>
+          <n-input-number v-model:value="budget" :min="0" :step="10000" style="max-width: 300px" />
+          <div v-if="budget !== null && listing.price !== null">
+            <strong v-if="listing.price > budget">Не хватает: {{ formatMoney(listing.price - budget) }}</strong>
+            <strong v-else>Остаётся: {{ formatMoney(budget - listing.price) }}</strong>
           </div>
         </n-space>
       </n-card>

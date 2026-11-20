@@ -413,26 +413,26 @@ impl VisionFilterConfig {
             return false;
         }
 
-        if let Some(min_price) = self.min_price {
-            if price.map(|p| p < min_price).unwrap_or(true) {
-                return false;
-            }
+        if let Some(min_price) = self.min_price
+            && price.map(|p| p < min_price).unwrap_or(true)
+        {
+            return false;
         }
-        if let Some(max_price) = self.max_price {
-            if price.map(|p| p > max_price).unwrap_or(false) {
-                return false;
-            }
+        if let Some(max_price) = self.max_price
+            && price.map(|p| p > max_price).unwrap_or(false)
+        {
+            return false;
         }
 
-        if let Some(min_area) = self.min_area {
-            if area.map(|a| a < min_area).unwrap_or(true) {
-                return false;
-            }
+        if let Some(min_area) = self.min_area
+            && area.map(|a| a < min_area).unwrap_or(true)
+        {
+            return false;
         }
-        if let Some(max_area) = self.max_area {
-            if area.map(|a| a > max_area).unwrap_or(false) {
-                return false;
-            }
+        if let Some(max_area) = self.max_area
+            && area.map(|a| a > max_area).unwrap_or(false)
+        {
+            return false;
         }
 
         if let Some(allowed_sources) = &self.sources {

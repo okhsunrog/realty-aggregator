@@ -138,10 +138,10 @@ async fn handle_ws_status(socket: WebSocket, state: AppState) {
 
     // Send current status immediately
     let current_status = state.collector.get_status().await;
-    if let Ok(json) = serde_json::to_string(&current_status) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
-            return;
-        }
+    if let Ok(json) = serde_json::to_string(&current_status)
+        && sender.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
     }
 
     // Spawn task to handle incoming messages (for ping/pong and close)
@@ -163,10 +163,10 @@ async fn handle_ws_status(socket: WebSocket, state: AppState) {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
-            if let Ok(json) = serde_json::to_string(&status) {
-                if sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
+            if let Ok(json) = serde_json::to_string(&status)
+                && sender.send(Message::Text(json.into())).await.is_err()
+            {
+                break;
             }
         }
     });

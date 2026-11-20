@@ -1,75 +1,32 @@
 services:
   postgres:
     image: postgres:17
-    container_name: realty-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: realty
-      POSTGRES_PASSWORD: realty_dev_password
+      POSTGRES_PASSWORD: realty
       POSTGRES_DB: realty
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U realty -d realty"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
-  minio:
-    image: realty-minio:7aac2a2c5b7c
-    container_name: realty-minio
+  s3:
+    image: rustfs/rustfs:1.0.6
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: realty
-      MINIO_ROOT_PASSWORD: realty_dev_password
+      RUSTFS_ACCESS_KEY: realty
+      RUSTFS_SECRET_KEY: realty-secret
     ports:
-      - "127.0.0.1:9000:9000"   # S3 API
-      - "127.0.0.1:9001:9001"   # Web Console
+      - "127.0.0.1:9000:9000"
     volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Optional container backend; native user service is recommended for this host.
-  # docker compose --profile backend up --build backend
-  backend:
-    image: realty-backend:local
-    build:
-      context: .
-      dockerfile: deploy/backend.Dockerfile
-    container_name: realty-backend
-    working_dir: /app
-    command: ["sh", "-c", "exec ./bin/${BACKEND_BIN:-backend} ${BACKEND_ARGS:-}"]
-    environment:
-      - SERVER_BIND=127.0.0.1:3000
-      - DATABASE_URL=postgres://realty:realty_dev_password@127.0.0.1:5432/realty
-      - MINIO_ENDPOINT=http://127.0.0.1:9000
-      - MINIO_ACCESS_KEY=realty
-      - MINIO_SECRET_KEY=realty_dev_password
-      - MINIO_BUCKET=realty-images
-      - RUST_LOG=${RUST_LOG:-backend=debug,tower_http=debug}
-      - MY_AI_PROXY
-      - BACKEND_BIN=${BACKEND_BIN:-backend}
-      - BACKEND_ARGS=${BACKEND_ARGS:-}
-    env_file:
-      - backend/.env
-    network_mode: host
-    volumes:
-      - ./backend/config.toml:/app/config.toml:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    profiles:
-      - backend
+      - s3:/data
 
 volumes:
-  postgres_data:
-  minio_data:
+  postgres:
+  s3:

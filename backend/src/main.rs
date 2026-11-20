@@ -66,17 +66,17 @@ async fn main() -> anyhow::Result<()> {
             // Ensure bucket exists
             if let Err(e) = client.ensure_bucket_exists().await {
                 tracing::warn!(
-                    "Failed to ensure MinIO bucket exists: {}. Image storage disabled.",
+                    "Failed to ensure S3 bucket exists: {}. Image storage disabled.",
                     e
                 );
                 None
             } else {
-                tracing::info!("MinIO storage client initialized");
+                tracing::info!("S3 storage client initialized");
                 Some(Arc::new(client))
             }
         }
         Err(e) => {
-            tracing::warn!("MinIO not configured: {}. Image storage disabled.", e);
+            tracing::warn!("S3 storage not configured: {}. Image storage disabled.", e);
             None
         }
     };

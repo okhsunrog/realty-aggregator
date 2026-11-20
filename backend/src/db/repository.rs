@@ -143,18 +143,18 @@ impl Repository {
             return Ok(false);
         }
         let mut changed = previous.as_ref().is_none_or(|p| p.changed);
-        if let Some(price) = l.price {
-            if previous.as_ref().is_none_or(|p| p.price != Some(price)) {
-                sqlx::query!(
-                    r#"INSERT INTO listing_price_history (listing_id, observed_at, price)
+        if let Some(price) = l.price
+            && previous.as_ref().is_none_or(|p| p.price != Some(price))
+        {
+            sqlx::query!(
+                r#"INSERT INTO listing_price_history (listing_id, observed_at, price)
                     VALUES ($1,$2,$3) ON CONFLICT DO NOTHING"#,
-                    l.id,
-                    l.source_time.unwrap_or(l.fetched_at),
-                    price
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
+                l.id,
+                l.source_time.unwrap_or(l.fetched_at),
+                price
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         if let Some(urls) = photos {
             let old = sqlx::query_scalar!(
